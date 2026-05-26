@@ -23,6 +23,23 @@ function numGames(): number {
   return Math.min(n, 20);
 }
 
+/**
+ * Master on/off switch via `GAME_ENABLED` env var.
+ *   - "on" / "true" / "1" / "yes" (or unset) → game runs normally
+ *   - "off" / "false" / "0" / "no" → all game progression is frozen
+ *
+ * When off, runTick is a no-op: no new games are started, in-flight games
+ * stop ticking, and chain submissions stop firing. In-memory game state is
+ * preserved untouched so flipping back to "on" picks up from the same FENs.
+ * On Vercel, new deployments inherit chain state via the totalGames bootstrap
+ * either way — so "off" deploys really just stop spending CDP ops.
+ */
+function isGameEnabled(): boolean {
+  const v = (process.env.GAME_ENABLED ?? "on").toLowerCase().trim();
+  if (v === "off" || v === "false" || v === "0" || v === "no") return false;
+  return true;
+}
+
 const MAX_MOVES = 200;
 const DEFAULT_MIN_MOVE_DELAY_MS = 1800;
 const DEFAULT_MAX_MOVE_DELAY_MS = 4500;
@@ -478,6 +495,7 @@ async function tickGame(state: ManagerState, game: GameState) {
 
 export async function runTick() {
   const state = getState();
+  if (!isGameEnabled()) return;          // env GAME_ENABLED=off freezes everything
   if (state.tickInProgress) return;
   state.tickInProgress = true;
   try {
@@ -532,6 +550,7 @@ export function snapshot() {
     stats: { ...state.stats },
     history: state.history.slice(0, 10),
     targetGameCount: numGames(),
+    paused: !isGameEnabled(),
   };
 }
 

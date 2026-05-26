@@ -2,6 +2,7 @@ import Navbar from "@/components/Navbar";
 import LiveConnection from "@/components/LiveConnection";
 import GameGrid from "@/components/GameGrid";
 import GameDetail from "@/components/GameDetail";
+import PausedBanner from "@/components/PausedBanner";
 
 export default function Home() {
   return (
@@ -10,6 +11,8 @@ export default function Home() {
       <LiveConnection />
 
       <main className="mx-auto max-w-7xl space-y-6 px-3 py-4 sm:px-4 sm:py-6">
+        <PausedBanner />
+
         <section>
           <SectionHeader
             title="Live games"

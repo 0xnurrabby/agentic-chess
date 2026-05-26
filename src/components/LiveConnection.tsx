@@ -39,6 +39,7 @@ export default function LiveConnection() {
             chainError: data.chainError,
             mode: data.mode,
             missingEnv: data.missingEnv,
+            paused: data.paused,
           });
           setConnected(true);
           backoff = 1000;

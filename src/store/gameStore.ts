@@ -20,6 +20,7 @@ interface GameStoreState {
   chainError: ChainError;
   mode: ChainMode;
   missingEnv: string[];
+  paused: boolean;
 
   setSnapshot: (data: {
     games: GameState[];
@@ -29,6 +30,7 @@ interface GameStoreState {
     chainError?: ChainError;
     mode?: ChainMode;
     missingEnv?: string[];
+    paused?: boolean;
   }) => void;
   selectGame: (id: number | null) => void;
   setConnected: (v: boolean) => void;
@@ -53,6 +55,7 @@ export const useGameStore = create<GameStoreState>((set, get) => ({
   chainError: { message: "", at: 0 },
   mode: "mock",
   missingEnv: [],
+  paused: false,
 
   setSnapshot: (data) => {
     const prev = get();
@@ -64,6 +67,7 @@ export const useGameStore = create<GameStoreState>((set, get) => ({
       chainError: data.chainError ?? prev.chainError,
       mode: data.mode ?? prev.mode,
       missingEnv: data.missingEnv ?? prev.missingEnv,
+      paused: data.paused ?? false,
       lastEventAt: Date.now(),
     };
     // Auto-select the first game on initial snapshot.
