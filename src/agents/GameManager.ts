@@ -15,6 +15,15 @@ import {
   isOnchainGameSlotTaken,
   getOnchainGame,
 } from "@/blockchain/readChain";
+import {
+  allocateGameId,
+  bootstrapLastGameId,
+  getAssignment,
+  isRedisEnabled,
+  listActiveGameIds,
+  removeGame,
+  saveAssignment,
+} from "@/lib/redis";
 
 function numGames(): number {
   const raw = process.env.NUM_GAMES;
@@ -117,10 +126,15 @@ function getState(): ManagerState {
 }
 
 /**
- * One-time bootstrap: align nextGameId with the contract's totalGames so a
- * fresh server process (which resets the in-memory counter to 1) doesn't
- * collide with games already recorded on chain from a previous run.
- * In mock mode this is a no-op.
+ * One-time bootstrap:
+ *   1. Initialize Redis counter (or local nextGameId) from chain.totalGames.
+ *      With Redis enabled, INCR provides atomic gameId allocation across
+ *      every Vercel lambda — no more race losers.
+ *   2. Re-hydrate any cross-instance active games from Redis so a brand new
+ *      lambda answering the SSE shows the SAME boards that other tabs are
+ *      already watching.
+ *
+ * Mock mode is a no-op.
  */
 async function ensureBootstrapped(state: ManagerState) {
   if (state.bootstrapped) return;
@@ -128,10 +142,97 @@ async function ensureBootstrapped(state: ManagerState) {
   if (isMockMode()) return;
   const total = await getOnchainTotalGames();
   if (total == null) return;
+
+  // Seed Redis counter from chain on first ever boot. SET NX so a later
+  // instance can't clobber the live counter.
+  await bootstrapLastGameId(Number(total));
+
   const next = Number(total) + 1;
   if (next > state.nextGameId) {
     state.nextGameId = next;
     console.log(`[GM] bootstrapped nextGameId=${next} from chain (totalGames=${total})`);
+  }
+
+  // Pull active games from the shared index and hydrate into local state.
+  if (isRedisEnabled()) {
+    await rehydrateFromRedis(state);
+  }
+}
+
+/**
+ * Reconstruct local game state for every gameId in the shared `chess:active`
+ * set. Pulls current FEN / moveCount from chain (chain is source of truth for
+ * positions) and agent assignment from Redis. Moves history is intentionally
+ * empty — the heavy per-move metadata stays in the original instance's memory
+ * to avoid hammering Redis. The board is the important thing to show.
+ */
+async function rehydrateFromRedis(state: ManagerState) {
+  const ids = await listActiveGameIds();
+  if (ids.length === 0) return;
+
+  const pool = getPool();
+  let loaded = 0;
+  for (const id of ids) {
+    if (state.games.has(id)) continue;
+    try {
+      // eslint-disable-next-line no-await-in-loop
+      const assign = await getAssignment(id);
+      // eslint-disable-next-line no-await-in-loop
+      const onchain = await getOnchainGame(id);
+      if (!assign || !onchain) continue;
+      if (!onchain.active) {
+        // Stale entry in Redis — clean up.
+        // eslint-disable-next-line no-await-in-loop
+        await removeGame(id);
+        continue;
+      }
+      const white = pool.get(assign.white);
+      const black = pool.get(assign.black);
+      if (!white || !black) continue;
+
+      // Make sure each persona's display address reflects the chain truth so
+      // syncGameFromChain's mismatch check (which runs every tick) doesn't
+      // immediately abandon this game.
+      white.walletAddress = onchain.whiteAgent;
+      black.walletAddress = onchain.blackAgent;
+      saveAgent(white);
+      saveAgent(black);
+
+      const moveCount = Number(onchain.moveCount);
+      const game: GameState = {
+        id,
+        whiteAgentId: white.id,
+        blackAgentId: black.id,
+        fen: onchain.currentFen,
+        pgn: "",                // history not reconstructed
+        moves: new Array(moveCount).fill(null).map((_, i) => ({
+          moveNumber: i + 1,
+          uci: "",
+          san: "·",
+          fenAfter: "",
+          by: i % 2 === 0 ? white.id : black.id,
+          color: (i % 2 === 0 ? "w" : "b") as "w" | "b",
+          txStatus: "confirmed",
+          timestamp: 0,
+        })),
+        turn: moveCount % 2 === 0 ? "w" : "b",
+        active: true,
+        result: "*",
+        startedAt: Date.now(),
+        lastMoveAt: Date.now(),
+      };
+      state.games.set(id, game);
+      state.nextTickAt.set(id, Date.now() + newTickGap());
+      loaded += 1;
+    } catch (err) {
+      console.warn(
+        `[GM] rehydrate game ${id} failed:`,
+        (err as Error)?.message ?? err,
+      );
+    }
+  }
+  if (loaded > 0) {
+    console.log(`[GM] rehydrated ${loaded} active game(s) from Redis`);
   }
 }
 
@@ -225,16 +326,29 @@ async function startNewGame(state: ManagerState) {
     return;
   }
 
-  // Claim a free gameId. nextGameId++ is sync and atomic in JS — concurrent
-  // ticks always get distinct ids. Verify the slot isn't already claimed on
-  // chain (stale RPC, other processes) before committing locally; cap retries.
-  let id = state.nextGameId++;
+  // Claim a free gameId. Prefer Redis INCR (atomic across every Vercel
+  // instance) over the local counter; fall back to local++ if Redis is
+  // unreachable. Then verify the slot isn't already claimed on chain (very
+  // unlikely with Redis INCR, but cheap defense).
+  let id: number | null = null;
+  if (!isMockMode() && isRedisEnabled()) {
+    id = await allocateGameId();
+  }
+  if (id == null) {
+    id = state.nextGameId++;
+  } else if (id >= state.nextGameId) {
+    state.nextGameId = id + 1;
+  }
   if (!isMockMode()) {
     for (let i = 0; i < 50; i++) {
       // eslint-disable-next-line no-await-in-loop
       if (!(await isOnchainGameSlotTaken(id))) break;
       console.log(`[GM] gameId ${id} taken on chain, advancing`);
-      id = state.nextGameId++;
+      // Re-allocate via Redis if possible to stay in sync with peers.
+      // eslint-disable-next-line no-await-in-loop
+      const next = isRedisEnabled() ? await allocateGameId() : null;
+      id = next ?? state.nextGameId++;
+      if (id >= state.nextGameId) state.nextGameId = id + 1;
     }
   }
 
@@ -256,6 +370,14 @@ async function startNewGame(state: ManagerState) {
   state.games.set(id, game);
   state.nextTickAt.set(id, Date.now() + newTickGap());
 
+  // Publish the assignment to Redis so any other lambda picking up an SSE
+  // connection sees this game and can re-hydrate.
+  if (isRedisEnabled()) {
+    saveAssignment(id, white.id, black.id).catch((e) =>
+      console.warn(`[GM] saveAssignment failed for ${id}:`, (e as Error)?.message ?? e),
+    );
+  }
+
   enqueueGameTxn(state, id, white.id, () =>
     sendStartGameTxn(id, white.walletAddress, black.walletAddress, white.id),
   )
@@ -273,6 +395,9 @@ async function startNewGame(state: ManagerState) {
           local.active = false;
           state.games.delete(id);
           state.nextTickAt.delete(id);
+        }
+        if (isRedisEnabled()) {
+          removeGame(id).catch(() => {});
         }
       }
     })
@@ -329,6 +454,9 @@ function endGame(state: ManagerState, game: GameState, result: GameResult) {
   );
 
   state.games.delete(game.id);
+  if (isRedisEnabled()) {
+    removeGame(game.id).catch(() => {});
+  }
 }
 
 /**
@@ -363,6 +491,7 @@ async function syncGameFromChain(state: ManagerState, game: GameState) {
     game.active = false;
     state.games.delete(game.id);
     state.nextTickAt.delete(game.id);
+    if (isRedisEnabled()) removeGame(game.id).catch(() => {});
     return;
   }
 
@@ -408,6 +537,7 @@ async function syncGameFromChain(state: ManagerState, game: GameState) {
     game.active = false;
     state.games.delete(game.id);
     state.nextTickAt.delete(game.id);
+    if (isRedisEnabled()) removeGame(game.id).catch(() => {});
     return;
   }
 
