@@ -13,6 +13,7 @@ import { getAgentWalletAddress } from "@/blockchain/walletPool";
 import {
   getOnchainTotalGames,
   getOnchainStats,
+  getOnchainGameMoves,
   isOnchainGameSlotTaken,
   getOnchainGame,
 } from "@/blockchain/readChain";
@@ -164,10 +165,10 @@ async function ensureBootstrapped(state: ManagerState) {
 
 /**
  * Reconstruct local game state for every gameId in the shared `chess:active`
- * set. Pulls current FEN / moveCount from chain (chain is source of truth for
- * positions) and agent assignment from Redis. Moves history is intentionally
- * empty — the heavy per-move metadata stays in the original instance's memory
- * to avoid hammering Redis. The board is the important thing to show.
+ * set. Position comes from chain (source of truth); the full move log is
+ * replayed from the contract's stored UCI list (proper SAN / FEN / colour /
+ * annotation) and tx hashes are pulled from MovePlayed events so the move
+ * log looks identical to the originating instance.
  */
 async function rehydrateFromRedis(state: ManagerState) {
   const ids = await listActiveGameIds();
@@ -184,7 +185,6 @@ async function rehydrateFromRedis(state: ManagerState) {
       const onchain = await getOnchainGame(id);
       if (!assign || !onchain) continue;
       if (!onchain.active) {
-        // Stale entry in Redis — clean up.
         // eslint-disable-next-line no-await-in-loop
         await removeGame(id);
         continue;
@@ -201,24 +201,46 @@ async function rehydrateFromRedis(state: ManagerState) {
       saveAgent(white);
       saveAgent(black);
 
-      const moveCount = Number(onchain.moveCount);
+      // Replay the full move history from chain for a complete move log.
+      // eslint-disable-next-line no-await-in-loop
+      const chainMoves = await getOnchainGameMoves(id);
+      const replay = new Chess();
+      const moves: MoveRecord[] = [];
+      if (chainMoves && chainMoves.length > 0) {
+        for (let i = 0; i < chainMoves.length; i++) {
+          const { uci, txHash } = chainMoves[i];
+          const fenBefore = replay.fen();
+          const mv = replay.move(
+            uci.length === 5
+              ? { from: uci.slice(0, 2), to: uci.slice(2, 4), promotion: uci[4] }
+              : { from: uci.slice(0, 2), to: uci.slice(2, 4) },
+          );
+          if (!mv) break;
+          const mover = i % 2 === 0 ? white : black;
+          moves.push({
+            moveNumber: i + 1,
+            uci,
+            san: mv.san,
+            fenAfter: replay.fen(),
+            by: mover.id,
+            color: mv.color,
+            txStatus: "confirmed",
+            txHash: txHash,
+            timestamp: 0,
+            annotation: annotateMove(fenBefore, mv, replay.history(), mover.personality),
+          });
+        }
+      }
+
+      const fen = moves.length > 0 ? replay.fen() : onchain.currentFen;
       const game: GameState = {
         id,
         whiteAgentId: white.id,
         blackAgentId: black.id,
-        fen: onchain.currentFen,
-        pgn: "",                // history not reconstructed
-        moves: new Array(moveCount).fill(null).map((_, i) => ({
-          moveNumber: i + 1,
-          uci: "",
-          san: "·",
-          fenAfter: "",
-          by: i % 2 === 0 ? white.id : black.id,
-          color: (i % 2 === 0 ? "w" : "b") as "w" | "b",
-          txStatus: "confirmed",
-          timestamp: 0,
-        })),
-        turn: moveCount % 2 === 0 ? "w" : "b",
+        fen,
+        pgn: replay.pgn(),
+        moves,
+        turn: (moves.length % 2 === 0 ? "w" : "b") as "w" | "b",
         active: true,
         result: "*",
         startedAt: Date.now(),
@@ -474,9 +496,27 @@ function endGame(state: ManagerState, game: GameState, result: GameResult) {
     console.warn(`[GM] endGame txn failed for game ${game.id}:`, e?.message ?? e),
   );
 
-  state.games.delete(game.id);
+  // Keep the finished game in local state for a short window so the UI can
+  // play a winner-announcement animation before the card slides out. It's
+  // already active=false with result + winnerAgentId set, so tickGame skips
+  // it and the refill loop (which counts only active games) backfills now.
+  // Remove from the shared Redis index immediately so other instances stop
+  // ticking it; local cleanup happens in runTick once endedAt is old enough.
   if (isRedisEnabled()) {
     removeGame(game.id).catch(() => {});
+  }
+}
+
+const ENDED_GAME_LINGER_MS = 4500;
+
+/** Delete games that ended more than ENDED_GAME_LINGER_MS ago. */
+function reapEndedGames(state: ManagerState) {
+  const now = Date.now();
+  for (const [id, g] of state.games) {
+    if (!g.active && g.endedAt && now - g.endedAt > ENDED_GAME_LINGER_MS) {
+      state.games.delete(id);
+      state.nextTickAt.delete(id);
+    }
   }
 }
 
@@ -708,9 +748,16 @@ export async function runTick() {
     await ensureBootstrapped(state);
     const target = numGames();
 
+    // Clear out games that ended a few seconds ago (their winner animation
+    // window has elapsed).
+    reapEndedGames(state);
+
     // Refill — start at most a couple of games per tick to avoid bursts of
-    // CDP smart-account provisioning when first running on mainnet.
-    let toStart = Math.min(2, target - state.games.size);
+    // CDP smart-account provisioning when first running on mainnet. Count
+    // only ACTIVE games toward the target so just-ended games lingering for
+    // the winner animation don't block new ones from starting.
+    const activeCountNow = [...state.games.values()].filter((g) => g.active).length;
+    let toStart = Math.min(2, target - activeCountNow);
     while (toStart > 0) {
       // eslint-disable-next-line no-await-in-loop
       await startNewGame(state);
@@ -720,9 +767,10 @@ export async function runTick() {
     // Advance. Filter due games then immediately reserve their next tick time
     // synchronously — that way overlapping tick callers (we already lock above,
     // but defense in depth) and the cron path can't double-process a game.
+    // Skip inactive (just-ended) games — they're only kept for the animation.
     const now = Date.now();
     const due = [...state.games.values()].filter(
-      (g) => (state.nextTickAt.get(g.id) ?? 0) <= now,
+      (g) => g.active && (state.nextTickAt.get(g.id) ?? 0) <= now,
     );
     for (const g of due) {
       state.nextTickAt.set(g.id, now + newTickGap());

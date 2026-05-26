@@ -134,6 +134,79 @@ export async function getOnchainGame(gameId: number): Promise<{
 }
 
 /**
+ * Read the full UCI move list for a game from the contract, plus the tx
+ * hashes for each move from MovePlayed event logs. Used to reconstruct a
+ * complete move log when a cold-started lambda rehydrates a game it didn't
+ * originate (the per-move metadata isn't in Redis).
+ *
+ * Returns moves in order with their hash where available (events may lag the
+ * view read by a block, so some recent hashes can be missing — those render
+ * as a non-link "onchain" badge).
+ */
+export async function getOnchainGameMoves(gameId: number): Promise<
+  | { uci: string; txHash?: `0x${string}` }[]
+  | null
+> {
+  const addr = contractAddress();
+  if (!addr) return null;
+  try {
+    const client = getClient();
+    const ucis = (await client.readContract({
+      address: addr,
+      abi: AGENTIC_CHESS_ABI,
+      functionName: "getGameMoves",
+      args: [BigInt(gameId)],
+    })) as string[];
+    if (!ucis || ucis.length === 0) return [];
+
+    // Map move number → tx hash from MovePlayed events.
+    const hashByMoveNo = new Map<number, `0x${string}`>();
+    try {
+      const logs = await client.getLogs({
+        address: addr,
+        event: {
+          type: "event",
+          name: "MovePlayed",
+          inputs: [
+            { name: "gameId", type: "uint256", indexed: true },
+            { name: "agentAddress", type: "address", indexed: true },
+            { name: "move", type: "string", indexed: false },
+            { name: "fen", type: "string", indexed: false },
+            { name: "moveNumber", type: "uint256", indexed: false },
+            { name: "timestamp", type: "uint256", indexed: false },
+          ],
+        },
+        args: { gameId: BigInt(gameId) },
+        fromBlock: "earliest",
+        toBlock: "latest",
+      });
+      for (const log of logs) {
+        const mn = Number((log as { args: { moveNumber?: bigint } }).args.moveNumber ?? 0);
+        const tx = (log as { transactionHash?: `0x${string}` }).transactionHash;
+        if (mn > 0 && tx) hashByMoveNo.set(mn, tx);
+      }
+    } catch (err) {
+      // Event lookups can be range-limited on some RPCs; degrade gracefully.
+      console.warn(
+        `[readChain] getLogs(MovePlayed ${gameId}) failed:`,
+        (err as Error)?.message ?? err,
+      );
+    }
+
+    return ucis.map((uci, i) => ({
+      uci,
+      txHash: hashByMoveNo.get(i + 1),
+    }));
+  } catch (err) {
+    console.warn(
+      `[readChain] getGameMoves(${gameId}) failed:`,
+      (err as Error)?.message ?? err,
+    );
+    return null;
+  }
+}
+
+/**
  * Check whether a given gameId slot is already claimed on chain.
  * Returns false on RPC failure so caller proceeds optimistically (chain will
  * reject with "exists" if it's actually taken).

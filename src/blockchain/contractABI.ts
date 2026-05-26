@@ -96,4 +96,11 @@ export const AGENTIC_CHESS_ABI = [
       },
     ],
   },
+  {
+    type: "function",
+    name: "getGameMoves",
+    stateMutability: "view",
+    inputs: [{ name: "gameId", type: "uint256" }],
+    outputs: [{ name: "", type: "string[]" }],
+  },
 ] as const;
