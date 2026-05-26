@@ -48,18 +48,46 @@ const K = {
 };
 
 /**
- * One-time bootstrap of the gameId counter from chain.totalGames. SET NX so
- * concurrent instances don't fight over the value — only the first writer
- * sticks.
+ * Bootstrap the gameId counter from chain.totalGames. Two phases:
+ *   1. SET NX so the first-ever writer initializes the counter atomically.
+ *   2. Catch-up: if the stored value is behind chainTotalGames (because the
+ *      bootstrap RPC was stale, or because games were created before Redis
+ *      was attached), bump the counter to chainTotalGames. INCR-only writes
+ *      after this are race-safe — multiple concurrent setters writing the
+ *      same value cause no harm.
  */
 export async function bootstrapLastGameId(chainTotalGames: number): Promise<void> {
   const r = getRedis();
   if (!r) return;
   try {
-    // Store the LAST USED gameId. INCR returns NEXT id.
     await r.set(K.lastGameId, chainTotalGames, { nx: true });
+    const current = Number((await r.get(K.lastGameId)) ?? 0);
+    if (current < chainTotalGames) {
+      await r.set(K.lastGameId, chainTotalGames);
+    }
   } catch (err) {
     console.warn("[redis] bootstrapLastGameId failed:", (err as Error)?.message ?? err);
+  }
+}
+
+/**
+ * Bulk-advance the counter to `floor` and return the next id. Used when the
+ * normal INCR returns a value that's already taken on chain (counter drifted
+ * behind chain reality from a stale bootstrap or external writes).
+ */
+export async function advanceLastGameId(floor: number): Promise<number | null> {
+  const r = getRedis();
+  if (!r) return null;
+  try {
+    const current = Number((await r.get(K.lastGameId)) ?? 0);
+    if (current < floor) {
+      await r.set(K.lastGameId, floor);
+    }
+    const id = await r.incr(K.lastGameId);
+    return Number(id);
+  } catch (err) {
+    console.warn("[redis] advanceLastGameId failed:", (err as Error)?.message ?? err);
+    return null;
   }
 }
 

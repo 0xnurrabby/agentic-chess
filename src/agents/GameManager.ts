@@ -16,6 +16,7 @@ import {
   getOnchainGame,
 } from "@/blockchain/readChain";
 import {
+  advanceLastGameId,
   allocateGameId,
   bootstrapLastGameId,
   getAssignment,
@@ -340,11 +341,29 @@ async function startNewGame(state: ManagerState) {
     state.nextGameId = id + 1;
   }
   if (!isMockMode()) {
-    for (let i = 0; i < 50; i++) {
+    let advanced = false;
+    for (let i = 0; i < 6; i++) {
       // eslint-disable-next-line no-await-in-loop
       if (!(await isOnchainGameSlotTaken(id))) break;
       console.log(`[GM] gameId ${id} taken on chain, advancing`);
-      // Re-allocate via Redis if possible to stay in sync with peers.
+      // First fall through tries the next id (cheap, helps if we're only a
+      // step or two behind). After that, bulk-advance Redis to chain's true
+      // totalGames in one shot — saves dozens of small probes when the
+      // bootstrap RPC was stale by hundreds.
+      if (!advanced && i >= 2) {
+        // eslint-disable-next-line no-await-in-loop
+        const chainTotal = await getOnchainTotalGames();
+        if (chainTotal != null && isRedisEnabled()) {
+          // eslint-disable-next-line no-await-in-loop
+          const next = await advanceLastGameId(Number(chainTotal));
+          if (next != null) {
+            id = next;
+            if (id >= state.nextGameId) state.nextGameId = id + 1;
+            advanced = true;
+            continue;
+          }
+        }
+      }
       // eslint-disable-next-line no-await-in-loop
       const next = isRedisEnabled() ? await allocateGameId() : null;
       id = next ?? state.nextGameId++;
