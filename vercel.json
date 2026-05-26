@@ -3,7 +3,7 @@
   "crons": [
     {
       "path": "/api/agent-engine",
-      "schedule": "* * * * *"
+      "schedule": "0 0 * * *"
     }
   ],
   "functions": {
