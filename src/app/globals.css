@@ -1,0 +1,56 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --bg: #0a0e1a;
+  --card: #111827;
+  --border: #1f2937;
+  --fg: #e5e7eb;
+  --muted: #9ca3af;
+  --indigo: #6366f1;
+  --emerald: #10b981;
+}
+
+:root.light {
+  --bg: #ffffff;
+  --card: #f9fafb;
+  --border: #e5e7eb;
+  --fg: #111827;
+  --muted: #6b7280;
+}
+
+html, body {
+  background: var(--bg);
+  color: var(--fg);
+  min-height: 100%;
+}
+
+body {
+  font-family: Inter, system-ui, -apple-system, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+.mono {
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+}
+
+/* Chessboard square highlight overrides */
+.last-move {
+  box-shadow: inset 0 0 0 3px rgba(99, 102, 241, 0.7);
+}
+
+/* Tiny scrollbar */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: var(--muted); }
+::-webkit-scrollbar-track { background: transparent; }
+
+/* Live pulse */
+@keyframes liveDot {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+.live-dot {
+  animation: liveDot 1.6s ease-in-out infinite;
+}

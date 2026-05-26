@@ -1,0 +1,17 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "crons": [
+    {
+      "path": "/api/agent-engine",
+      "schedule": "* * * * *"
+    }
+  ],
+  "functions": {
+    "src/app/api/games/route.ts": {
+      "maxDuration": 60
+    },
+    "src/app/api/agent-engine/route.ts": {
+      "maxDuration": 60
+    }
+  }
+}
