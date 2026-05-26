@@ -53,8 +53,8 @@ export async function GET(_req: NextRequest) {
         }
       };
 
-      const sendSnapshot = (event: string) => {
-        const snap = snapshot();
+      const sendSnapshot = async (event: string) => {
+        const snap = await snapshot();
         send(event, {
           ...snap,
           leaderboard: cachedLeaderboard(),
@@ -71,7 +71,7 @@ export async function GET(_req: NextRequest) {
       interval = setInterval(async () => {
         try {
           await runTick();
-          sendSnapshot("tick");
+          await sendSnapshot("tick");
         } catch (err) {
           send("error", { message: (err as Error)?.message ?? "tick failed" });
         }

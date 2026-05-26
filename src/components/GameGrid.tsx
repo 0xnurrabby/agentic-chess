@@ -3,6 +3,7 @@
 import { useGameStore } from "@/store/gameStore";
 import GameBoard from "./GameBoard";
 import { Chess } from "chess.js";
+import { AnimatePresence, motion } from "framer-motion";
 
 export default function GameGrid() {
   const games = useGameStore((s) => s.games);
@@ -23,51 +24,58 @@ export default function GameGrid() {
 
   return (
     <div className={`grid gap-3 ${colClasses}`}>
-      {games.map((g) => {
-        const white = agents[g.whiteAgentId];
-        const black = agents[g.blackAgentId];
-        const isActive = selected === g.id;
-        const inCheck = isInCheck(g.fen);
-        return (
-          <button
-            key={g.id}
-            onClick={() => select(g.id)}
-            className={`group flex flex-col gap-2 rounded-xl border bg-[var(--card)] p-2 text-left transition ${
-              isActive
-                ? "border-accent-indigo shadow-[0_0_0_2px_rgba(99,102,241,0.35)]"
-                : "border-[var(--border)] hover:border-accent-indigo/60"
-            }`}
-          >
-            <div className="flex items-center justify-between text-[10px] text-[var(--muted)]">
-              <span className="mono">G{g.id}</span>
-              <div className="flex items-center gap-1">
-                {inCheck && (
-                  <span className="rounded bg-red-500/15 px-1 text-red-400">check</span>
-                )}
-                <span className="live-dot text-accent-emerald">●</span>
+      <AnimatePresence mode="popLayout" initial={false}>
+        {games.map((g) => {
+          const white = agents[g.whiteAgentId];
+          const black = agents[g.blackAgentId];
+          const isActive = selected === g.id;
+          const inCheck = isInCheck(g.fen);
+          return (
+            <motion.button
+              key={g.id}
+              layout
+              initial={{ opacity: 0, scale: 0.85 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.85 }}
+              transition={{ duration: 0.35, ease: [0.22, 1, 0.36, 1] }}
+              onClick={() => select(g.id)}
+              className={`group flex flex-col gap-2 rounded-xl border bg-[var(--card)] p-2 text-left transition ${
+                isActive
+                  ? "border-accent-indigo shadow-[0_0_0_2px_rgba(99,102,241,0.35)]"
+                  : "border-[var(--border)] hover:border-accent-indigo/60"
+              }`}
+            >
+              <div className="flex items-center justify-between text-[10px] text-[var(--muted)]">
+                <span className="mono">G{g.id}</span>
+                <div className="flex items-center gap-1">
+                  {inCheck && (
+                    <span className="rounded bg-red-500/15 px-1 text-red-400">check</span>
+                  )}
+                  <span className="live-dot text-accent-emerald">●</span>
+                </div>
               </div>
-            </div>
 
-            <GameBoard game={g} />
+              <GameBoard game={g} />
 
-            <div className="flex items-center justify-between gap-1 text-xs">
-              <div className="flex min-w-0 items-center gap-1">
-                <span className="shrink-0">{white?.avatar}</span>
-                <span className="mono truncate">{white?.elo ?? "?"}</span>
+              <div className="flex items-center justify-between gap-1 text-xs">
+                <div className="flex min-w-0 items-center gap-1">
+                  <span className="shrink-0">{white?.avatar}</span>
+                  <span className="mono truncate">{white?.elo ?? "?"}</span>
+                </div>
+                <span className="mono shrink-0 text-[var(--muted)]">vs</span>
+                <div className="flex min-w-0 items-center justify-end gap-1">
+                  <span className="mono truncate">{black?.elo ?? "?"}</span>
+                  <span className="shrink-0">{black?.avatar}</span>
+                </div>
               </div>
-              <span className="mono shrink-0 text-[var(--muted)]">vs</span>
-              <div className="flex min-w-0 items-center justify-end gap-1">
-                <span className="mono truncate">{black?.elo ?? "?"}</span>
-                <span className="shrink-0">{black?.avatar}</span>
-              </div>
-            </div>
 
-            <div className="mono truncate text-[10px] text-[var(--muted)]">
-              move {g.moves.length} · {g.turn === "w" ? "white" : "black"}
-            </div>
-          </button>
-        );
-      })}
+              <div className="mono truncate text-[10px] text-[var(--muted)]">
+                move {g.moves.length} · {g.turn === "w" ? "white" : "black"}
+              </div>
+            </motion.button>
+          );
+        })}
+      </AnimatePresence>
       {games.length === 0 &&
         Array.from({ length: 5 }).map((_, i) => (
           <div

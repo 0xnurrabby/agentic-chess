@@ -5,8 +5,9 @@ import { useGameStore } from "@/store/gameStore";
 
 /**
  * Mounts once. Opens an SSE connection to /api/games and forwards every
- * snapshot into the Zustand store. Reconnects on error with exponential
- * backoff (capped at 10s).
+ * snapshot into the Zustand store. Vercel kills SSE functions at
+ * maxDuration (60s on Hobby), so reconnects are the norm — handle them
+ * gracefully with a fast first retry and gentle backoff after that.
  */
 export default function LiveConnection() {
   const setSnapshot = useGameStore((s) => s.setSnapshot);
@@ -14,7 +15,7 @@ export default function LiveConnection() {
 
   useEffect(() => {
     let es: EventSource | null = null;
-    let backoff = 1000;
+    let backoff = 200;          // start tiny — Vercel SSE drops every 60s
     let stopped = false;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -42,7 +43,7 @@ export default function LiveConnection() {
             paused: data.paused,
           });
           setConnected(true);
-          backoff = 1000;
+          backoff = 200;
         } catch (err) {
           console.warn("[SSE] parse failed", err);
         }
@@ -55,10 +56,12 @@ export default function LiveConnection() {
       es.addEventListener("gameEnd", handleSnap);
 
       es.onerror = () => {
-        setConnected(false);
+        // DON'T flip setConnected(false) — the store keeps showing the last
+        // good state, and reconnect happens fast (200ms). The user only
+        // sees "disconnected" if reconnects keep failing.
         es?.close();
         if (stopped) return;
-        backoff = Math.min(backoff * 1.8, 10_000);
+        backoff = Math.min(backoff * 1.6, 5_000);
         reconnectTimer = setTimeout(connect, backoff);
       };
     }

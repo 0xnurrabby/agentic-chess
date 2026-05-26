@@ -43,7 +43,7 @@ export async function GET(req: NextRequest) {
     await new Promise((r) => setTimeout(r, 800));
   }
 
-  const snap = snapshot();
+  const snap = await snapshot();
   return NextResponse.json({
     ok: true,
     ticks,

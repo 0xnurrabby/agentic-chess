@@ -12,6 +12,7 @@ import {
 import { getAgentWalletAddress } from "@/blockchain/walletPool";
 import {
   getOnchainTotalGames,
+  getOnchainStats,
   isOnchainGameSlotTaken,
   getOnchainGame,
 } from "@/blockchain/readChain";
@@ -736,7 +737,7 @@ export async function runTick() {
   }
 }
 
-export function snapshot() {
+export async function snapshot() {
   const state = getState();
   const games = [...state.games.values()].map((g) => structuredClone(g));
   const agentsMap: Record<string, Agent> = {};
@@ -747,10 +748,29 @@ export function snapshot() {
     if (w) agentsMap[w.id] = w;
     if (b) agentsMap[b.id] = b;
   }
+
+  // Override stats with chain-truth where possible — local counters are
+  // per-instance and reset on cold start. getOnchainStats is cached so
+  // repeated SSE ticks don't hammer the RPC.
+  const stats = { ...state.stats };
+  if (!isMockMode()) {
+    const onchain = await getOnchainStats();
+    if (onchain) {
+      stats.totalGames = onchain.totalGames;
+      stats.totalMoves = onchain.totalMoves;
+      // totalTxns isn't a contract field — startGame + N moves + endGame per
+      // game. Approximate: totalMoves + 2 * totalGames is the upper bound
+      // (endGame may not have fired for active games). Active games still
+      // count their startGame, so use totalMoves + games + (completed ≈ totalGames - active).
+      const completed = Math.max(0, onchain.totalGames - games.length);
+      stats.totalTxns = onchain.totalMoves + onchain.totalGames + completed;
+    }
+  }
+
   return {
     games,
     agents: agentsMap,
-    stats: { ...state.stats },
+    stats,
     history: state.history.slice(0, 10),
     targetGameCount: numGames(),
     paused: !isGameEnabled(),

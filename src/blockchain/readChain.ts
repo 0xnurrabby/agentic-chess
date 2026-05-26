@@ -46,6 +46,48 @@ export async function getOnchainTotalGames(): Promise<bigint | null> {
 }
 
 /**
+ * Read both totalGames and totalMoves from the contract. These are the
+ * authoritative numbers shown in the platform stats header — local counters
+ * are per-instance and reset on cold start.
+ *
+ * Cached for `STATS_TTL_MS` so repeated SSE ticks don't hammer the RPC.
+ */
+const STATS_TTL_MS = 12_000;
+let statsCache:
+  | { at: number; totalGames: number; totalMoves: number }
+  | null = null;
+
+export async function getOnchainStats(): Promise<{
+  totalGames: number;
+  totalMoves: number;
+} | null> {
+  const addr = contractAddress();
+  if (!addr) return null;
+  const now = Date.now();
+  if (statsCache && now - statsCache.at < STATS_TTL_MS) {
+    return { totalGames: statsCache.totalGames, totalMoves: statsCache.totalMoves };
+  }
+  try {
+    const [games_, moves_] = (await getClient().readContract({
+      address: addr,
+      abi: AGENTIC_CHESS_ABI,
+      functionName: "getStats",
+    })) as [bigint, bigint];
+    statsCache = {
+      at: now,
+      totalGames: Number(games_),
+      totalMoves: Number(moves_),
+    };
+    return { totalGames: statsCache.totalGames, totalMoves: statsCache.totalMoves };
+  } catch (err) {
+    console.warn("[readChain] getStats failed:", (err as Error)?.message ?? err);
+    return statsCache
+      ? { totalGames: statsCache.totalGames, totalMoves: statsCache.totalMoves }
+      : null;
+  }
+}
+
+/**
  * Read the full game record (currentFen, moveCount, active) for a gameId from
  * the contract. Returns null if no contract is configured or the RPC call
  * fails. Used to resync local state when chain falls behind (e.g. when a

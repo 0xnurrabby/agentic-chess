@@ -59,11 +59,29 @@ export const useGameStore = create<GameStoreState>((set, get) => ({
 
   setSnapshot: (data) => {
     const prev = get();
+
+    // Monotonic stats: never let counters decrease (e.g. when an SSE
+    // reconnect lands on a freshly-booted lambda whose totalGames has not
+    // caught up to chain yet). Keep the maximum we've ever seen.
+    const stats: PlatformStats = {
+      ...data.stats,
+      totalGames: Math.max(prev.stats.totalGames, data.stats.totalGames),
+      totalMoves: Math.max(prev.stats.totalMoves, data.stats.totalMoves),
+      totalTxns: Math.max(prev.stats.totalTxns, data.stats.totalTxns),
+    };
+
+    // If the lambda answering this snapshot has not yet rehydrated its
+    // active games (returns [] but we already know about some), preserve
+    // the previous view so the user doesn't see an empty grid for a beat.
+    const games = data.games.length === 0 && prev.games.length > 0
+      ? prev.games
+      : data.games;
+
     const next: Partial<GameStoreState> = {
-      games: data.games,
+      games,
       agents: { ...prev.agents, ...data.agents },
-      leaderboard: data.leaderboard,
-      stats: data.stats,
+      leaderboard: data.leaderboard.length > 0 ? data.leaderboard : prev.leaderboard,
+      stats,
       chainError: data.chainError ?? prev.chainError,
       mode: data.mode ?? prev.mode,
       missingEnv: data.missingEnv ?? prev.missingEnv,
@@ -71,15 +89,15 @@ export const useGameStore = create<GameStoreState>((set, get) => ({
       lastEventAt: Date.now(),
     };
     // Auto-select the first game on initial snapshot.
-    if (prev.selectedGameId == null && data.games.length > 0) {
-      next.selectedGameId = data.games[0].id;
+    if (prev.selectedGameId == null && games.length > 0) {
+      next.selectedGameId = games[0].id;
     }
     // If the currently selected game has ended (gone from the list), pick another.
     if (
       prev.selectedGameId != null &&
-      !data.games.some((g) => g.id === prev.selectedGameId)
+      !games.some((g) => g.id === prev.selectedGameId)
     ) {
-      next.selectedGameId = data.games[0]?.id ?? null;
+      next.selectedGameId = games[0]?.id ?? null;
     }
     set(next);
   },
