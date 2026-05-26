@@ -10,6 +10,34 @@ export type GameResult = "1-0" | "0-1" | "1/2-1/2" | "*";
 
 export type TxStatus = "pending" | "confirmed" | "failed";
 
+export type AnnotationKind =
+  | "checkmate"
+  | "castleK"
+  | "castleQ"
+  | "promotion"
+  | "enpassant"
+  | "capGain"
+  | "capSac"
+  | "capEven"
+  | "check"
+  | "center"
+  | "develop"
+  | "claimCenter"
+  | "earlyQueen"
+  | "kingEndgame"
+  | "nearCenter"
+  | "quiet";
+
+export interface AnnotationData {
+  piece: string;           // piece letter that moved (p,n,b,r,q,k)
+  kind: AnnotationKind;
+  to?: string;             // destination square (omitted for castles/checkmate)
+  captured?: string;       // captured piece letter
+  promotion?: string;      // promoted piece letter
+  check?: boolean;         // capture-with-check addon
+  opening?: string;        // opening name (left untranslated)
+}
+
 export interface AgentRecord {
   wins: number;
   losses: number;
@@ -39,7 +67,8 @@ export interface MoveRecord {
   txHash?: `0x${string}`;
   txStatus: TxStatus;
   timestamp: number;
-  annotation?: string; // learning-mode hint
+  annotation?: string; // learning-mode hint (English fallback)
+  annotationData?: AnnotationData; // structured form, used for live translation
 }
 
 export interface GameState {

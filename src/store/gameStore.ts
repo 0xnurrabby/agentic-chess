@@ -1,5 +1,27 @@
 import { create } from "zustand";
 import type { Agent, GameState, PlatformStats } from "@/types";
+import { DEFAULT_LANG, isLang, type Lang } from "@/i18n/annotations";
+
+const LANG_STORAGE_KEY = "agentic-chess.lang";
+
+function readStoredLang(): Lang {
+  if (typeof window === "undefined") return DEFAULT_LANG;
+  try {
+    const v = window.localStorage.getItem(LANG_STORAGE_KEY);
+    return isLang(v) ? v : DEFAULT_LANG;
+  } catch {
+    return DEFAULT_LANG;
+  }
+}
+
+function persistLang(lang: Lang) {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(LANG_STORAGE_KEY, lang);
+  } catch {
+    // localStorage may be unavailable (private mode, quota) — non-fatal.
+  }
+}
 
 interface ChainError {
   message: string;
@@ -16,6 +38,7 @@ interface GameStoreState {
   selectedGameId: number | null;
   connected: boolean;
   learningMode: boolean;
+  language: Lang;
   lastEventAt: number;
   chainError: ChainError;
   mode: ChainMode;
@@ -35,6 +58,7 @@ interface GameStoreState {
   selectGame: (id: number | null) => void;
   setConnected: (v: boolean) => void;
   toggleLearningMode: () => void;
+  setLanguage: (lang: Lang) => void;
 }
 
 export const useGameStore = create<GameStoreState>((set, get) => ({
@@ -51,6 +75,7 @@ export const useGameStore = create<GameStoreState>((set, get) => ({
   selectedGameId: null,
   connected: false,
   learningMode: true,
+  language: DEFAULT_LANG,
   lastEventAt: 0,
   chainError: { message: "", at: 0 },
   mode: "mock",
@@ -105,4 +130,20 @@ export const useGameStore = create<GameStoreState>((set, get) => ({
   selectGame: (id) => set({ selectedGameId: id }),
   setConnected: (v) => set({ connected: v }),
   toggleLearningMode: () => set((s) => ({ learningMode: !s.learningMode })),
+  setLanguage: (lang) => {
+    persistLang(lang);
+    set({ language: lang });
+  },
 }));
+
+/**
+ * Hydrate the language preference from localStorage on the client.
+ * Called from a useEffect in the UI so the server-rendered HTML still
+ * shows the default and matches what hydrates initially.
+ */
+export function hydrateLanguageFromStorage() {
+  const stored = readStoredLang();
+  if (useGameStore.getState().language !== stored) {
+    useGameStore.setState({ language: stored });
+  }
+}

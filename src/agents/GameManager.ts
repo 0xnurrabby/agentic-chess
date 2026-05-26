@@ -2,7 +2,7 @@ import { Chess, Move } from "chess.js";
 import { Agent, GameResult, GameState, MoveRecord, PlatformStats } from "@/types";
 import { getPool, matchAgents, saveAgent, flush } from "./AgentPool";
 import { recordResult } from "./Agent";
-import { annotateMove, detectOpening, pickMove } from "./MoveEngine";
+import { annotateMove, buildAnnotationData, detectOpening, pickMove } from "./MoveEngine";
 import {
   sendMoveTxn,
   sendStartGameTxn,
@@ -228,6 +228,7 @@ async function rehydrateFromRedis(state: ManagerState) {
             txHash: txHash,
             timestamp: 0,
             annotation: annotateMove(fenBefore, mv, replay.history(), mover.personality),
+            annotationData: buildAnnotationData(fenBefore, mv, replay.history(), mover.personality),
           });
         }
       }
@@ -704,6 +705,7 @@ async function tickGame(state: ManagerState, game: GameState) {
     txStatus: "pending",
     timestamp: Date.now(),
     annotation: annotateMove(fenBefore, result, sanList, mover.personality),
+    annotationData: buildAnnotationData(fenBefore, result, sanList, mover.personality),
   };
 
   game.moves.push(record);

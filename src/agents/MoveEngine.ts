@@ -1,5 +1,7 @@
 import { Chess, Move } from "chess.js";
 import { Personality } from "@/types";
+import type { AnnotationData, AnnotationKind } from "@/types";
+import { renderAnnotation } from "@/i18n/annotations";
 import { pick } from "@/lib/utils";
 
 /**
@@ -217,27 +219,13 @@ export function pickMove(fen: string, personality: Personality): PickedMove | nu
 // Learning-mode annotations — light, rule-based, never AI-call.
 // Every annotation explains HOW the moving piece moves PLUS what this
 // specific move achieves. Beginner-friendly first, agent-behavior second.
+//
+// The classification logic lives here and produces a structured
+// AnnotationData. The actual text (in any language) is rendered by
+// `renderAnnotation` from `@/i18n/annotations` — that way the same data
+// can be displayed in English, Bangla, Hindi, Chinese, or Russian
+// without re-running this engine.
 // ---------------------------------------------------------------
-
-/** One-sentence movement rule for each piece. Beginners see this every move. */
-function pieceMovement(p: string): string {
-  switch (p) {
-    case "p":
-      return "Pawn — moves one square forward (two from its starting rank), captures diagonally. The only piece that can't move backward.";
-    case "n":
-      return "Knight — jumps in an L-shape: two squares one way, then one perpendicular. The only piece that can leap over others.";
-    case "b":
-      return "Bishop — slides diagonally any number of squares. Each bishop stays on its starting color forever.";
-    case "r":
-      return "Rook — slides any number of squares horizontally or vertically. Strongest on open files.";
-    case "q":
-      return "Queen — combines rook + bishop. Slides any direction, any distance. The most powerful piece on the board.";
-    case "k":
-      return "King — moves one square in any direction. Slow, but if it's checkmated the game is over.";
-    default:
-      return "";
-  }
-}
 
 const OPENINGS: Array<{ moves: string[]; name: string }> = [
   { moves: ["e4", "e5"], name: "Open Game" },
@@ -277,92 +265,105 @@ export function detectOpening(sanMoves: string[]): string | undefined {
 }
 
 /**
- * Two-part annotation: "How the piece moves" + "What this move achieves".
- * The personality argument is accepted so the signature stays stable, but
- * only used as a light hint for tactical-style moves — beginners learn more
- * from the piece + move-intent than from style labels.
+ * Classifies the move into a structured AnnotationData. The kind picks
+ * the educational sentence ("checkmate", "develop", "capGain", …) and
+ * params carry the variable bits (destination square, captured piece,
+ * etc). Returns undefined only if the input is malformed.
+ *
+ * The personality argument is accepted so the signature stays stable —
+ * styling differences are handled by the move-selection code, not the
+ * commentary.
  */
-export function annotateMove(
+export function buildAnnotationData(
   fenBefore: string,
   move: Move,
   movesSoFar: string[],
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   personality: Personality = "RANDOM",
-): string | undefined {
-  const piece = PIECE_NAME[move.piece] ?? "piece";
-  const movement = pieceMovement(move.piece);
+): AnnotationData | undefined {
   const moveNo = movesSoFar.length + 1;
-
-  // --- What this specific move achieves (the educational meat). ---
-  let what: string;
+  let kind: AnnotationKind;
+  let captured: string | undefined;
+  let promotion: string | undefined;
+  let check: boolean | undefined;
+  let to: string | undefined = move.to;
 
   if (move.san.endsWith("#")) {
-    what = `Checkmate. The enemy king is attacked and has no legal way to escape, block, or capture the attacker — game over.`;
+    kind = "checkmate";
+    to = undefined;
   } else if (move.san === "O-O") {
-    what =
-      "Castles kingside. A one-time special move where the king slides two squares toward the rook and the rook hops over to its other side — getting the king to safety behind its pawns while activating the rook.";
+    kind = "castleK";
+    to = undefined;
   } else if (move.san === "O-O-O") {
-    what =
-      "Castles queenside. Same special move as kingside castling but on the queen's side — the rook travels farther, so the king ends up a bit more exposed.";
+    kind = "castleQ";
+    to = undefined;
   } else if (move.promotion) {
-    const promoted = PIECE_NAME[move.promotion] ?? "piece";
-    what = `Pawn reaches the last rank and instantly promotes to a ${promoted}. Promotion is free — the pawn simply becomes a stronger piece, almost always a queen.`;
+    kind = "promotion";
+    promotion = move.promotion;
   } else if (move.flags.includes("e")) {
-    what =
-      "En passant — a special pawn capture, available only on the turn right after an enemy pawn jumped two squares past you. The capturing pawn moves diagonally as if the enemy pawn had moved one square.";
+    kind = "enpassant";
   } else if (move.captured) {
-    const captured = PIECE_NAME[move.captured] ?? "piece";
+    captured = move.captured;
     const capV = PIECE_VALUE[move.captured] ?? 0;
     const ourV = PIECE_VALUE[move.piece] ?? 0;
-    const check = move.san.endsWith("+") ? " Plus check — the king is also attacked." : "";
-    if (capV > ourV + 50) {
-      what = `Captures the enemy ${captured}. The ${captured} is worth more than the ${piece} taking it — material gain.${check}`;
-    } else if (capV + 50 < ourV) {
-      what = `Captures the enemy ${captured} with the ${piece}. A sacrifice — giving up a more valuable piece for an attack or a long-term positional idea.${check}`;
-    } else {
-      what = `Captures the enemy ${captured}. A roughly even trade — both pieces are similar value.${check}`;
-    }
+    check = move.san.endsWith("+");
+    if (capV > ourV + 50) kind = "capGain";
+    else if (capV + 50 < ourV) kind = "capSac";
+    else kind = "capEven";
   } else if (move.san.endsWith("+")) {
-    what = `Check — the ${piece} attacks the enemy king. The opponent MUST respond next move: move the king, block the attack, or capture the attacker.`;
+    kind = "check";
   } else if (CENTER_SQUARES.has(move.to)) {
-    what = `Plants the ${piece} on a central square (${move.to}). The four central squares are the most valuable real estate — pieces here control the most board.`;
+    kind = "center";
   } else if (
     moveNo <= 14 &&
     (move.piece === "n" || move.piece === "b") &&
     (move.from.endsWith("1") || move.from.endsWith("8"))
   ) {
-    what = `Develops the ${piece} from its starting square to ${move.to}. The opening rule is: bring out knights and bishops before launching attacks or moving the queen.`;
+    kind = "develop";
   } else if (
     move.piece === "p" &&
     (move.to[1] === "4" || move.to[1] === "5") &&
     moveNo <= 8
   ) {
-    what = `Claims central territory with a pawn push to ${move.to}. Central pawns restrict the enemy's pieces and support your own.`;
+    kind = "claimCenter";
   } else if (move.piece === "q" && moveNo <= 8) {
-    what = `Brings the queen out early to ${move.to}. Risky — minor pieces can chase the queen around with tempo, losing time the opponent uses to develop.`;
+    kind = "earlyQueen";
   } else if (move.piece === "k" && moveNo > 24) {
-    what = `King walks to ${move.to}. In the endgame the king becomes an active piece — with few attackers left, it joins the fight.`;
+    kind = "kingEndgame";
   } else if (EXTENDED_CENTER.has(move.to)) {
-    what = `Steps to ${move.to}, near the center. Pieces here support central control without sitting on the front line.`;
+    kind = "nearCenter";
   } else {
-    what = `Quiet move to ${move.to}. Repositions for a future plan rather than starting a tactical fight right now.`;
+    kind = "quiet";
   }
 
-  // Opening name as a short tail if we can identify the line.
-  let opening = "";
+  let opening: string | undefined;
   if (moveNo <= 10) {
     const o = detectOpening(movesSoFar);
-    if (o) opening = ` Opening: ${o}.`;
+    if (o) opening = o;
   }
 
-  return `${movement} ${what}${opening}`;
+  return {
+    piece: move.piece,
+    kind,
+    to,
+    captured,
+    promotion,
+    check,
+    opening,
+  };
 }
 
-const PIECE_NAME: Record<string, string> = {
-  p: "pawn",
-  n: "knight",
-  b: "bishop",
-  r: "rook",
-  q: "queen",
-  k: "king",
-};
+/**
+ * Backwards-compatible English string form. Built from the same
+ * structured data the client uses to render other languages.
+ */
+export function annotateMove(
+  fenBefore: string,
+  move: Move,
+  movesSoFar: string[],
+  personality: Personality = "RANDOM",
+): string | undefined {
+  const data = buildAnnotationData(fenBefore, move, movesSoFar, personality);
+  if (!data) return undefined;
+  return renderAnnotation(data, "en");
+}

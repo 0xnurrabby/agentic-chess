@@ -1,9 +1,10 @@
 "use client";
 
-import { useGameStore } from "@/store/gameStore";
+import { hydrateLanguageFromStorage, useGameStore } from "@/store/gameStore";
 import TxnBadge from "./TxnBadge";
 import type { GameState, MoveRecord } from "@/types";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
+import { LANGUAGES, renderAnnotation, type Lang } from "@/i18n/annotations";
 
 const VISIBLE_BUFFER = 100; // render at most this many moves in the DOM
 
@@ -16,10 +17,48 @@ const BLACK_TONE = "rgba(248, 113, 113, 1)";       // red-400
 const BLACK_BORDER = "rgba(248, 113, 113, 0.55)";
 const BLACK_ANNOTATION = "rgba(252, 165, 165, 0.95)"; // red-300
 
+function annotationText(m: MoveRecord, lang: Lang): string | undefined {
+  if (m.annotationData) {
+    try {
+      return renderAnnotation(m.annotationData, lang);
+    } catch {
+      // Fall through to the English text below if anything in the
+      // dictionary lookup goes wrong — never crash the log.
+    }
+  }
+  return m.annotation;
+}
+
 export default function MoveLog({ game }: { game: GameState }) {
   const agents = useGameStore((s) => s.agents);
   const learningMode = useGameStore((s) => s.learningMode);
+  const language = useGameStore((s) => s.language);
+  const setLanguage = useGameStore((s) => s.setLanguage);
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  const [langOpen, setLangOpen] = useState(false);
+  const langWrapRef = useRef<HTMLDivElement | null>(null);
+
+  // Hydrate the stored language preference once on mount.
+  useEffect(() => {
+    hydrateLanguageFromStorage();
+  }, []);
+
+  // Close the language picker on outside click / escape.
+  useEffect(() => {
+    if (!langOpen) return;
+    const onClick = (e: MouseEvent) => {
+      if (!langWrapRef.current?.contains(e.target as Node)) setLangOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setLangOpen(false);
+    };
+    document.addEventListener("mousedown", onClick);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onClick);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [langOpen]);
 
   // Auto-scroll to top (latest move) when a new move arrives.
   useEffect(() => {
@@ -33,9 +72,11 @@ export default function MoveLog({ game }: { game: GameState }) {
       : game.moves;
   const truncated = game.moves.length - visibleMoves.length;
 
+  const activeLang = LANGUAGES.find((l) => l.code === language) ?? LANGUAGES[0];
+
   return (
     <div className="flex h-full flex-col rounded-xl border border-[var(--border)] bg-[var(--card)]">
-      <div className="flex items-center justify-between border-b border-[var(--border)] px-4 py-2">
+      <div className="flex items-center justify-between gap-2 border-b border-[var(--border)] px-4 py-2">
         <div className="text-sm font-semibold">Move log</div>
         <div className="flex items-center gap-3 text-[10px]">
           <span className="mono text-[var(--muted)]">
@@ -54,6 +95,50 @@ export default function MoveLog({ game }: { game: GameState }) {
             />
             <span style={{ color: BLACK_TONE }}>Black</span>
           </span>
+          <div ref={langWrapRef} className="relative">
+            <button
+              type="button"
+              onClick={() => setLangOpen((o) => !o)}
+              className="mono flex items-center gap-1 rounded border border-[var(--border)] bg-[var(--bg)] px-1.5 py-0.5 text-[10px] text-[var(--fg)] hover:border-[var(--muted)]"
+              title="Annotation language"
+              aria-haspopup="listbox"
+              aria-expanded={langOpen}
+            >
+              <span>{activeLang.short}</span>
+              <span className="text-[var(--muted)]">▾</span>
+            </button>
+            {langOpen && (
+              <ul
+                role="listbox"
+                className="absolute right-0 top-full z-20 mt-1 min-w-[140px] overflow-hidden rounded-md border border-[var(--border)] bg-[var(--card)] py-1 text-[11px] shadow-lg"
+              >
+                {LANGUAGES.map((l) => {
+                  const active = l.code === language;
+                  return (
+                    <li key={l.code}>
+                      <button
+                        type="button"
+                        role="option"
+                        aria-selected={active}
+                        onClick={() => {
+                          setLanguage(l.code);
+                          setLangOpen(false);
+                        }}
+                        className={`flex w-full items-center justify-between gap-2 px-2.5 py-1 text-left hover:bg-[var(--bg)] ${
+                          active ? "text-[var(--fg)]" : "text-[var(--muted)]"
+                        }`}
+                      >
+                        <span>{l.label}</span>
+                        <span className="mono text-[10px] text-[var(--muted)]">
+                          {l.short}
+                        </span>
+                      </button>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </div>
         </div>
       </div>
       <div
@@ -74,6 +159,7 @@ export default function MoveLog({ game }: { game: GameState }) {
             const sideTone = isWhite ? WHITE_TONE : BLACK_TONE;
             const sideBorder = isWhite ? WHITE_BORDER : BLACK_BORDER;
             const sideAnnotation = isWhite ? WHITE_ANNOTATION : BLACK_ANNOTATION;
+            const note = annotationText(m, language);
             return (
               <li
                 key={m.moveNumber}
@@ -100,12 +186,12 @@ export default function MoveLog({ game }: { game: GameState }) {
                 <div className="shrink-0">
                   <TxnBadge move={m} />
                 </div>
-                {learningMode && m.annotation && (
+                {learningMode && note && (
                   <div
                     className="basis-full pl-9 pr-2 pt-0.5 text-[11px] italic leading-snug"
                     style={{ color: sideAnnotation }}
                   >
-                    {m.annotation}
+                    {note}
                   </div>
                 )}
               </li>
