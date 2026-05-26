@@ -45,6 +45,7 @@ const K = {
   lastGameId: "chess:lastGameId",
   active: "chess:active",
   assign: (id: number) => `chess:assign:${id}`,
+  lock: (id: number) => `chess:lock:${id}`,
 };
 
 /**
@@ -157,7 +158,39 @@ export async function removeGame(gameId: number): Promise<void> {
   try {
     await r.srem(K.active, gameId);
     await r.del(K.assign(gameId));
+    await r.del(K.lock(gameId));
   } catch (err) {
     console.warn("[redis] removeGame failed:", (err as Error)?.message ?? err);
+  }
+}
+
+/**
+ * Per-game tick lease. Many Vercel lambdas may have the same game in their
+ * in-memory state (everyone rehydrates from Redis); without coordination
+ * each one will independently call `tickGame` on the same beat — duplicate
+ * moves, "white turn" / "black turn" reverts, half the configured delay.
+ *
+ * tryAcquireGameLock returns true ONLY for the instance that won the race.
+ * The lock auto-expires after `ttlSec` so a crashing instance can't freeze
+ * a game forever. Callers should pick a TTL slightly longer than the
+ * maximum move delay.
+ */
+export async function tryAcquireGameLock(
+  gameId: number,
+  ttlSec: number,
+): Promise<boolean> {
+  const r = getRedis();
+  // If Redis isn't configured we fall back to per-instance behavior — every
+  // tick proceeds. Better imperfect than frozen.
+  if (!r) return true;
+  try {
+    const result = await r.set(K.lock(gameId), "1", { nx: true, ex: ttlSec });
+    return result === "OK";
+  } catch (err) {
+    console.warn(
+      `[redis] tryAcquireGameLock(${gameId}) failed:`,
+      (err as Error)?.message ?? err,
+    );
+    return true; // fail open
   }
 }

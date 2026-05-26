@@ -25,6 +25,7 @@ import {
   listActiveGameIds,
   removeGame,
   saveAssignment,
+  tryAcquireGameLock,
 } from "@/lib/redis";
 
 function numGames(): number {
@@ -726,7 +727,20 @@ export async function runTick() {
     for (const g of due) {
       state.nextTickAt.set(g.id, now + newTickGap());
     }
+
+    // Cross-instance per-game lock. The same game can live in multiple
+    // lambdas' memory (everyone rehydrates from Redis). Without this, every
+    // lambda independently ticks the game on the same beat — duplicate
+    // moves, "not an agent" reverts, and the effective delay between moves
+    // is divided by the number of active instances. Lock TTL is slightly
+    // longer than the configured max delay so a crashed instance can't
+    // freeze a game forever.
+    const [, maxDelay] = moveDelayRange();
+    const lockTtlSec = Math.max(5, Math.ceil(maxDelay / 1000) + 2);
     for (const g of due) {
+      // eslint-disable-next-line no-await-in-loop
+      const gotLock = await tryAcquireGameLock(g.id, lockTtlSec);
+      if (!gotLock) continue; // another lambda is ticking this beat
       // eslint-disable-next-line no-await-in-loop
       await tickGame(state, g);
     }

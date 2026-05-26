@@ -36,15 +36,30 @@ export default function TxnBadge({ move }: { move: MoveRecord }) {
     );
   }
 
+  // Rehydrated moves (loaded from Redis after a cold-start) don't carry a
+  // per-move tx hash — we know the move happened on chain (chain.moveCount
+  // says so) but the individual hash lives in the original instance's
+  // memory. Show a non-link "onchain" badge instead of a dead link.
+  if (!move.txHash) {
+    return (
+      <span
+        className="mono inline-flex items-center gap-1 rounded bg-accent-emerald/15 px-1.5 py-0.5 text-[10px] text-accent-emerald"
+        title="Recorded on chain. Tx hash not available on this server instance."
+      >
+        <Check size={10} /> onchain
+      </span>
+    );
+  }
+
   return (
     <a
-      href={move.txHash ? explorerTxUrl(move.txHash, chain) : "#"}
+      href={explorerTxUrl(move.txHash, chain)}
       target="_blank"
       rel="noreferrer"
       className="mono inline-flex items-center gap-1 rounded bg-accent-emerald/15 px-1.5 py-0.5 text-[10px] text-accent-emerald hover:bg-accent-emerald/25"
     >
       <Check size={10} />
-      {move.txHash ? shortHash(move.txHash, 3) : "ok"}
+      {shortHash(move.txHash, 3)}
       <ExternalLink size={9} />
     </a>
   );
