@@ -258,9 +258,27 @@ async function startNewGame(state: ManagerState) {
 
   enqueueGameTxn(state, id, white.id, () =>
     sendStartGameTxn(id, white.walletAddress, black.walletAddress, white.id),
-  ).catch((e) =>
-    console.warn(`[GM] startGame txn failed for game ${id}:`, e?.message ?? e),
-  );
+  )
+    .then((res) => {
+      // If startGame didn't land on chain (most common: another Vercel
+      // instance won the gameId race and chain reverted with "exists"),
+      // tear down the local game right now. Otherwise tickGame would
+      // happily enqueue a playMove that's guaranteed to revert with
+      // "not an agent" — wasting CDP ops and surfacing as failed badges
+      // in the UI.
+      if (res.status === "failed") {
+        console.log(`[GM] game ${id} startGame failed — abandoning local immediately`);
+        const local = state.games.get(id);
+        if (local) {
+          local.active = false;
+          state.games.delete(id);
+          state.nextTickAt.delete(id);
+        }
+      }
+    })
+    .catch((e) =>
+      console.warn(`[GM] startGame txn error for game ${id}:`, e?.message ?? e),
+    );
 }
 
 function endGame(state: ManagerState, game: GameState, result: GameResult) {
