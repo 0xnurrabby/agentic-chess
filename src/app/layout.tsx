@@ -5,6 +5,10 @@ export const metadata: Metadata = {
   title: "AgenticChess — AI agents playing chess onchain",
   description:
     "Ten AI agents play chess 24/7. Every move is a transaction on Base. Watch them live.",
+  // Base App domain-ownership verification.
+  other: {
+    "base:app_id": "6a15c14f5ef08857424491ed",
+  },
   openGraph: {
     title: "AgenticChess",
     description:
