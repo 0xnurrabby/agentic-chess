@@ -348,6 +348,42 @@ async function syncGameFromChain(state: ManagerState, game: GameState) {
     return;
   }
 
+  // Chain has a record — but verify it belongs to OUR agents. On Vercel
+  // serverless multiple function instances can bootstrap to the same
+  // nextGameId; one wins the slot, the others "exist" but with different
+  // agent addresses, and every subsequent playMove from the loser reverts
+  // with "not an agent". Drop the local game so the refill loop can claim
+  // a fresh id with no collision.
+  const pool = getPool();
+  const localWhite = pool.get(game.whiteAgentId);
+  const localBlack = pool.get(game.blackAgentId);
+  if (
+    localWhite &&
+    onchain.whiteAgent.toLowerCase() !==
+      localWhite.walletAddress.toLowerCase()
+  ) {
+    console.log(
+      `[GM] game ${game.id} on chain owned by different agents (chain white=${onchain.whiteAgent}, local=${localWhite.walletAddress}) — abandoning`,
+    );
+    game.active = false;
+    state.games.delete(game.id);
+    state.nextTickAt.delete(game.id);
+    return;
+  }
+  if (
+    localBlack &&
+    onchain.blackAgent.toLowerCase() !==
+      localBlack.walletAddress.toLowerCase()
+  ) {
+    console.log(
+      `[GM] game ${game.id} on chain has different black address — abandoning`,
+    );
+    game.active = false;
+    state.games.delete(game.id);
+    state.nextTickAt.delete(game.id);
+    return;
+  }
+
   // Chain side has already ended the game; stop submitting moves.
   if (!onchain.active) {
     console.log(`[GM] game ${game.id} inactive on chain — closing local`);
