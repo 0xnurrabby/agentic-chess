@@ -1,5 +1,5 @@
 import { NextRequest } from "next/server";
-import { ensureSeeded, runTick, snapshot } from "@/agents/GameManager";
+import { ensureSeeded, runCatchUp, runTick, snapshot } from "@/agents/GameManager";
 import { leaderboard } from "@/agents/AgentPool";
 import { getLastChainError, isMockMode } from "@/blockchain/sendMove";
 import { cdpMissingEnvList } from "@/blockchain/cdpClient";
@@ -64,6 +64,10 @@ export async function GET(_req: NextRequest) {
           timestamp: Date.now(),
         });
       };
+
+      // Wake the shared engine briefly so a visitor sees current boards even
+      // after Vercel has scaled the previous function instance to zero.
+      await runCatchUp({ maxTicks: 2, maxDurationMs: 6_000 });
 
       // Initial snapshot
       sendSnapshot("init");

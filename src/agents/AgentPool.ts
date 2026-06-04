@@ -3,12 +3,14 @@ import path from "node:path";
 import { Agent } from "@/types";
 import { createAgent } from "./Agent";
 import { decryptString, encryptString } from "@/lib/crypto";
+import { loadAgentStates, saveAgentState } from "@/lib/redis";
 
 const DATA_DIR = path.join(process.cwd(), "data");
 const POOL_FILE = path.join(DATA_DIR, "agents.json");
 
 let pool: Map<string, Agent> | null = null;
-let activeCountCache: number | null = null;
+let redisHydrationStarted = false;
+let redisHydrationDone = false;
 
 /**
  * Maximum total agents that can be seeded. One wallet per agent (1:1) is
@@ -40,13 +42,13 @@ function activeAgentRange(): [number, number] {
 }
 
 export function activeCount(): number {
-  if (activeCountCache != null) return activeCountCache;
   const [min, max] = activeAgentRange();
-  activeCountCache = min + Math.floor(Math.random() * (max - min + 1));
-  console.log(
-    `[AgentPool] active rotation pool size: ${activeCountCache} (range ${min}-${max})`,
-  );
-  return activeCountCache;
+  if (max === min) return min;
+  const agents = [...getPool().values()];
+  const minimumCovered = agents
+    .slice(0, min)
+    .every((a) => (a.lastPlayedAt ?? 0) > 0);
+  return minimumCovered ? max : min;
 }
 
 function ensureDir() {
@@ -114,9 +116,35 @@ export function getPool(): Map<string, Agent> {
   return pool;
 }
 
+export async function hydrateAgentsFromRedis(): Promise<void> {
+  if (redisHydrationDone) return;
+  if (redisHydrationStarted) {
+    while (!redisHydrationDone) {
+      // eslint-disable-next-line no-await-in-loop
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    return;
+  }
+  redisHydrationStarted = true;
+  try {
+    const p = getPool();
+    const saved = await loadAgentStates();
+    let changed = false;
+    for (const agent of saved) {
+      if (!p.has(agent.id)) continue;
+      p.set(agent.id, agent);
+      changed = true;
+    }
+    if (changed) persist(p);
+  } finally {
+    redisHydrationDone = true;
+  }
+}
+
 export function saveAgent(a: Agent) {
   const p = getPool();
   p.set(a.id, a);
+  saveAgentState(a).catch(() => {});
 }
 
 export function flush() {
@@ -140,12 +168,18 @@ export function matchAgents(exclude: Set<string>): [Agent, Agent] | null {
     (a, b) => (a.lastPlayedAt ?? 0) - (b.lastPlayedAt ?? 0),
   );
 
-  // Rotation slice: oldest ~30% (min 20 candidates).
-  const rotationPoolSize = Math.max(
-    Math.min(20, byRecency.length),
-    Math.floor(byRecency.length * 0.3),
+  // Prefer never-played agents first. This makes MIN_ACTIVE_AGENTS mean
+  // "cover at least this many personas" before the same small cohort recycles.
+  const leastPlayedAt = byRecency[0].lastPlayedAt ?? 0;
+  const freshWave = byRecency.filter(
+    (a) => (a.lastPlayedAt ?? 0) === leastPlayedAt,
   );
-  const rotationPool = byRecency.slice(0, rotationPoolSize);
+  const rotationBase = freshWave.length >= 2 ? freshWave : byRecency;
+  const rotationPoolSize = Math.min(
+    rotationBase.length,
+    Math.max(2, Math.min(40, Math.ceil(rotationBase.length * 0.2))),
+  );
+  const rotationPool = rotationBase.slice(0, rotationPoolSize);
 
   const upset = Math.random() < 0.15;
   let a: Agent;
@@ -157,10 +191,11 @@ export function matchAgents(exclude: Set<string>): [Agent, Agent] | null {
     } while (b.id === a.id);
   } else {
     a = rotationPool[Math.floor(Math.random() * rotationPool.length)];
-    const band = allActive.filter(
+    const band = rotationBase.filter(
       (x) => x.id !== a.id && Math.abs(x.elo - a.elo) <= 200,
     );
-    const candidates = band.length > 0 ? band : allActive.filter((x) => x.id !== a.id);
+    const candidates =
+      band.length > 0 ? band : rotationBase.filter((x) => x.id !== a.id);
     b = candidates[Math.floor(Math.random() * candidates.length)];
   }
 

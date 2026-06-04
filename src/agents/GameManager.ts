@@ -1,6 +1,6 @@
 import { Chess, Move } from "chess.js";
 import { Agent, GameResult, GameState, MoveRecord, PlatformStats } from "@/types";
-import { getPool, matchAgents, saveAgent, flush } from "./AgentPool";
+import { getPool, matchAgents, saveAgent, flush, hydrateAgentsFromRedis } from "./AgentPool";
 import { recordResult } from "./Agent";
 import { annotateMove, buildAnnotationData, detectOpening, pickMove } from "./MoveEngine";
 import {
@@ -22,10 +22,13 @@ import {
   allocateGameId,
   bootstrapLastGameId,
   getAssignment,
+  getSavedGameState,
   isRedisEnabled,
   listActiveGameIds,
   removeGame,
+  saveGameState,
   saveAssignment,
+  tryAcquireEngineLock,
   tryAcquireGameLock,
 } from "@/lib/redis";
 
@@ -143,18 +146,21 @@ function getState(): ManagerState {
 async function ensureBootstrapped(state: ManagerState) {
   if (state.bootstrapped) return;
   state.bootstrapped = true; // set first so concurrent ticks don't all try
-  if (isMockMode()) return;
-  const total = await getOnchainTotalGames();
-  if (total == null) return;
+  await hydrateAgentsFromRedis();
 
-  // Seed Redis counter from chain on first ever boot. SET NX so a later
-  // instance can't clobber the live counter.
-  await bootstrapLastGameId(Number(total));
+  if (!isMockMode()) {
+    const total = await getOnchainTotalGames();
+    if (total != null) {
+      // Seed Redis counter from chain on first ever boot. SET NX so a later
+      // instance can't clobber the live counter.
+      await bootstrapLastGameId(Number(total));
 
-  const next = Number(total) + 1;
-  if (next > state.nextGameId) {
-    state.nextGameId = next;
-    console.log(`[GM] bootstrapped nextGameId=${next} from chain (totalGames=${total})`);
+      const next = Number(total) + 1;
+      if (next > state.nextGameId) {
+        state.nextGameId = next;
+        console.log(`[GM] bootstrapped nextGameId=${next} from chain (totalGames=${total})`);
+      }
+    }
   }
 
   // Pull active games from the shared index and hydrate into local state.
@@ -179,6 +185,15 @@ async function rehydrateFromRedis(state: ManagerState) {
   for (const id of ids) {
     if (state.games.has(id)) continue;
     try {
+      // eslint-disable-next-line no-await-in-loop
+      const saved = await getSavedGameState(id);
+      if (saved?.game?.active) {
+        state.games.set(id, saved.game);
+        state.nextTickAt.set(id, Math.max(saved.nextTickAt, Date.now()));
+        loaded += 1;
+        continue;
+      }
+
       // eslint-disable-next-line no-await-in-loop
       const assign = await getAssignment(id);
       // eslint-disable-next-line no-await-in-loop
@@ -265,6 +280,12 @@ async function rehydrateFromRedis(state: ManagerState) {
 function newTickGap() {
   const [min, max] = moveDelayRange();
   return min + Math.random() * (max - min);
+}
+
+function persistGame(state: ManagerState, game: GameState) {
+  if (!isRedisEnabled()) return;
+  const nextTickAt = state.nextTickAt.get(game.id) ?? Date.now() + newTickGap();
+  saveGameState(structuredClone(game), nextTickAt).catch(() => {});
 }
 
 /**
@@ -413,12 +434,16 @@ async function startNewGame(state: ManagerState) {
 
   state.games.set(id, game);
   state.nextTickAt.set(id, Date.now() + newTickGap());
+  persistGame(state, game);
 
   // Publish the assignment to Redis so any other lambda picking up an SSE
   // connection sees this game and can re-hydrate.
   if (isRedisEnabled()) {
     saveAssignment(id, white.id, black.id).catch((e) =>
       console.warn(`[GM] saveAssignment failed for ${id}:`, (e as Error)?.message ?? e),
+    );
+    saveGameState(structuredClone(game), state.nextTickAt.get(id) ?? Date.now()).catch((e) =>
+      console.warn(`[GM] saveGameState failed for ${id}:`, (e as Error)?.message ?? e),
     );
   }
 
@@ -504,6 +529,7 @@ function endGame(state: ManagerState, game: GameState, result: GameResult) {
   // Remove from the shared Redis index immediately so other instances stop
   // ticking it; local cleanup happens in runTick once endedAt is old enough.
   if (isRedisEnabled()) {
+    saveGameState(structuredClone(game), Date.now() + ENDED_GAME_LINGER_MS).catch(() => {});
     removeGame(game.id).catch(() => {});
   }
 }
@@ -629,6 +655,7 @@ async function syncGameFromChain(state: ManagerState, game: GameState) {
     }
   }
   game.pgn = chess.pgn();
+  persistGame(state, game);
 }
 
 async function tickGame(state: ManagerState, game: GameState) {
@@ -717,6 +744,7 @@ async function tickGame(state: ManagerState, game: GameState) {
   state.stats.totalMoves += 1;
   state.stats.pendingTxns += 1;
   state.nextTickAt.set(game.id, Date.now() + newTickGap());
+  persistGame(state, game);
 
   enqueueGameTxn(state, game.id, mover.id, () =>
     sendMoveTxn(game.id, picked.uci, fenAfter, mover.id),
@@ -726,10 +754,12 @@ async function tickGame(state: ManagerState, game: GameState) {
       record.txStatus = res.status;
       state.stats.totalTxns += 1;
       state.stats.pendingTxns = Math.max(0, state.stats.pendingTxns - 1);
+      persistGame(state, game);
     })
     .catch((e) => {
       record.txStatus = "failed";
       state.stats.pendingTxns = Math.max(0, state.stats.pendingTxns - 1);
+      persistGame(state, game);
       console.warn(`[GM] move txn failed g=${game.id}:`, e?.message ?? e);
     });
 
@@ -801,8 +831,35 @@ export async function runTick() {
   }
 }
 
+export async function runCatchUp(options?: {
+  maxTicks?: number;
+  maxDurationMs?: number;
+  spacingMs?: number;
+}) {
+  const maxTicks = Math.max(1, Math.min(options?.maxTicks ?? 4, 20));
+  const maxDurationMs = Math.max(500, Math.min(options?.maxDurationMs ?? 8_000, 25_000));
+  const spacingMs = Math.max(0, Math.min(options?.spacingMs ?? 0, 1_000));
+  const lockTtlSec = Math.ceil(maxDurationMs / 1000) + 2;
+  const gotLock = await tryAcquireEngineLock(lockTtlSec);
+  if (!gotLock) return 0;
+
+  const startedAt = Date.now();
+  let ticks = 0;
+  while (ticks < maxTicks && Date.now() - startedAt < maxDurationMs) {
+    // eslint-disable-next-line no-await-in-loop
+    await runTick();
+    ticks += 1;
+    if (spacingMs > 0 && ticks < maxTicks) {
+      // eslint-disable-next-line no-await-in-loop
+      await new Promise((r) => setTimeout(r, spacingMs));
+    }
+  }
+  return ticks;
+}
+
 export async function snapshot() {
   const state = getState();
+  await ensureBootstrapped(state);
   const games = [...state.games.values()].map((g) => structuredClone(g));
   const agentsMap: Record<string, Agent> = {};
   const pool = getPool();

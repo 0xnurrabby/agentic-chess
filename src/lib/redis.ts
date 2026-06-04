@@ -1,4 +1,5 @@
 import { Redis } from "@upstash/redis";
+import type { Agent, GameState } from "@/types";
 
 /**
  * Shared cross-instance state via Upstash Redis.
@@ -44,9 +45,18 @@ export function isRedisEnabled(): boolean {
 const K = {
   lastGameId: "chess:lastGameId",
   active: "chess:active",
+  agents: "chess:agents",
+  engineLock: "chess:engine:lock",
   assign: (id: number) => `chess:assign:${id}`,
+  game: (id: number) => `chess:game:${id}`,
   lock: (id: number) => `chess:lock:${id}`,
 };
+
+export interface SavedGameState {
+  game: GameState;
+  nextTickAt: number;
+  updatedAt: number;
+}
 
 /**
  * Bootstrap the gameId counter from chain.totalGames. Two phases:
@@ -121,6 +131,87 @@ export async function saveAssignment(
   }
 }
 
+/** Persist the latest game position so cold starts can resume without a viewer. */
+export async function saveGameState(
+  game: GameState,
+  nextTickAt: number,
+): Promise<void> {
+  const r = getRedis();
+  if (!r) return;
+  try {
+    const saved: SavedGameState = {
+      game,
+      nextTickAt,
+      updatedAt: Date.now(),
+    };
+    await r.set(K.game(game.id), JSON.stringify(saved));
+    if (game.active) await r.sadd(K.active, game.id);
+  } catch (err) {
+    console.warn(
+      `[redis] saveGameState(${game.id}) failed:`,
+      (err as Error)?.message ?? err,
+    );
+  }
+}
+
+/** Load the latest persisted game snapshot for a shared active game. */
+export async function getSavedGameState(
+  gameId: number,
+): Promise<SavedGameState | null> {
+  const r = getRedis();
+  if (!r) return null;
+  try {
+    const raw = await r.get(K.game(gameId));
+    if (!raw) return null;
+    if (typeof raw === "string") return JSON.parse(raw) as SavedGameState;
+    return raw as SavedGameState;
+  } catch (err) {
+    console.warn(
+      `[redis] getSavedGameState(${gameId}) failed:`,
+      (err as Error)?.message ?? err,
+    );
+    return null;
+  }
+}
+
+/** Persist an agent's durable state: wallet address, ELO, record, and rotation time. */
+export async function saveAgentState(agent: Agent): Promise<void> {
+  const r = getRedis();
+  if (!r) return;
+  try {
+    await r.hset(K.agents, { [agent.id]: JSON.stringify(agent) });
+  } catch (err) {
+    console.warn(
+      `[redis] saveAgentState(${agent.id}) failed:`,
+      (err as Error)?.message ?? err,
+    );
+  }
+}
+
+/** Load all persisted agent states into the in-memory pool on cold start. */
+export async function loadAgentStates(): Promise<Agent[]> {
+  const r = getRedis();
+  if (!r) return [];
+  try {
+    const raw = (await r.hgetall(K.agents)) as Record<string, unknown> | null;
+    if (!raw) return [];
+    const out: Agent[] = [];
+    for (const value of Object.values(raw)) {
+      try {
+        const parsed =
+          typeof value === "string" ? JSON.parse(value) : (value as Agent);
+        if (parsed && typeof parsed.id === "string") out.push(parsed as Agent);
+      } catch {
+        // Ignore one bad record; the next save will overwrite it.
+      }
+    }
+    return out;
+  } catch (err) {
+    console.warn("[redis] loadAgentStates failed:", (err as Error)?.message ?? err);
+    return [];
+  }
+}
+
 export async function getAssignment(
   gameId: number,
 ): Promise<{ white: string; black: string } | null> {
@@ -158,9 +249,23 @@ export async function removeGame(gameId: number): Promise<void> {
   try {
     await r.srem(K.active, gameId);
     await r.del(K.assign(gameId));
+    await r.del(K.game(gameId));
     await r.del(K.lock(gameId));
   } catch (err) {
     console.warn("[redis] removeGame failed:", (err as Error)?.message ?? err);
+  }
+}
+
+/** Short global lease for bounded catch-up/cron loops. */
+export async function tryAcquireEngineLock(ttlSec: number): Promise<boolean> {
+  const r = getRedis();
+  if (!r) return true;
+  try {
+    const result = await r.set(K.engineLock, "1", { nx: true, ex: ttlSec });
+    return result === "OK";
+  } catch (err) {
+    console.warn("[redis] tryAcquireEngineLock failed:", (err as Error)?.message ?? err);
+    return true;
   }
 }
 

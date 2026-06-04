@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { ensureSeeded, runTick, snapshot } from "@/agents/GameManager";
+import { ensureSeeded, runCatchUp, snapshot } from "@/agents/GameManager";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -32,16 +32,13 @@ export async function GET(req: NextRequest) {
 
   ensureSeeded();
 
-  // Burst-tick: cron fires at most every 60s, so do multiple ticks to keep
-  // games moving for users who arrive between SSE sessions.
-  const startedAt = Date.now();
-  let ticks = 0;
-  // Cap at ~25s so we stay well under maxDuration.
-  while (Date.now() - startedAt < 25_000 && ticks < 30) {
-    await runTick();
-    ticks += 1;
-    await new Promise((r) => setTimeout(r, 800));
-  }
+  // Vercel Hobby cron is low-frequency and every second counts against
+  // function usage, so keep this as a bounded wake-up instead of a daemon.
+  const ticks = await runCatchUp({
+    maxTicks: parseInt(process.env.BACKGROUND_CATCHUP_TICKS ?? "8", 10),
+    maxDurationMs: parseInt(process.env.BACKGROUND_CATCHUP_MS ?? "10000", 10),
+    spacingMs: 500,
+  });
 
   const snap = await snapshot();
   return NextResponse.json({
