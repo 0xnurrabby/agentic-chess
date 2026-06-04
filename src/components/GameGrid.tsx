@@ -23,7 +23,7 @@ export default function GameGrid() {
       : "grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5";
 
   return (
-    <div className={`grid gap-3 ${colClasses}`}>
+    <motion.div layout className={`grid gap-3 ${colClasses}`}>
       <AnimatePresence mode="popLayout" initial={false}>
         {games.map((g) => {
           const white = agents[g.whiteAgentId];
@@ -36,10 +36,10 @@ export default function GameGrid() {
             <motion.button
               key={g.id}
               layout
-              initial={{ opacity: 0, scale: 0.85 }}
-              animate={{ opacity: 1, scale: 1 }}
-              exit={{ opacity: 0, scale: 0.85 }}
-              transition={{ duration: 0.35, ease: [0.22, 1, 0.36, 1] }}
+              initial={{ opacity: 0, scale: 0.92, y: 12 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.9, y: -8 }}
+              transition={{ layout: { duration: 0.35 }, duration: 0.28, ease: [0.22, 1, 0.36, 1] }}
               onClick={() => select(g.id)}
               className={`group relative flex flex-col gap-2 rounded-xl border bg-[var(--card)] p-2 text-left transition ${
                 isActive
@@ -122,7 +122,7 @@ export default function GameGrid() {
             className="aspect-square animate-pulse rounded-xl border border-[var(--border)] bg-[var(--card)]"
           />
         ))}
-    </div>
+    </motion.div>
   );
 }
 

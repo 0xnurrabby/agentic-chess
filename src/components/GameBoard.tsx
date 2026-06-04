@@ -3,6 +3,7 @@
 import dynamic from "next/dynamic";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { GameState } from "@/types";
+import { motion } from "framer-motion";
 
 // react-chessboard pulls in piece SVGs and refers to window — must be client-only.
 const Chessboard = dynamic(() => import("react-chessboard").then((m) => m.Chessboard), {
@@ -107,29 +108,90 @@ export default function GameBoard({
   }, [highlightLastMove, lastMove, game.fen, game.moves.length]);
 
   const boardWidth = forceWidth ?? measuredWidth;
+  const moveOverlay = useMemo(() => {
+    if (!lastMove || boardWidth <= 0) return null;
+    const from = squareCenter(lastMove.uci.slice(0, 2), boardWidth);
+    const to = squareCenter(lastMove.uci.slice(2, 4), boardWidth);
+    if (!from || !to) return null;
+    const dx = to.x - from.x;
+    const dy = to.y - from.y;
+    const len = Math.max(1, Math.sqrt(dx * dx + dy * dy));
+    const angle = Math.atan2(dy, dx) * (180 / Math.PI);
+    return { from, to, len, angle, key: `${game.id}-${lastMove.moveNumber}-${lastMove.uci}` };
+  }, [boardWidth, game.id, lastMove]);
 
   return (
     <div ref={containerRef} className="w-full">
       {boardWidth > 0 ? (
-        <Chessboard
-          position={game.fen}
-          boardWidth={boardWidth}
-          arePiecesDraggable={interactive}
-          showBoardNotation={showCoordinates}
-          customSquareStyles={customSquareStyles}
-          customDarkSquareStyle={{ backgroundColor: DARK_SQUARE }}
-          customLightSquareStyle={{ backgroundColor: LIGHT_SQUARE }}
-          customBoardStyle={{
-            borderRadius: 10,
-            boxShadow: BOARD_SHADOW,
-          }}
-          animationDuration={280}
-        />
+        <div className="relative">
+          <Chessboard
+            position={game.fen}
+            boardWidth={boardWidth}
+            arePiecesDraggable={interactive}
+            showBoardNotation={showCoordinates}
+            customSquareStyles={customSquareStyles}
+            customDarkSquareStyle={{ backgroundColor: DARK_SQUARE }}
+            customLightSquareStyle={{ backgroundColor: LIGHT_SQUARE }}
+            customBoardStyle={{
+              borderRadius: 10,
+              boxShadow: BOARD_SHADOW,
+            }}
+            animationDuration={420}
+          />
+          {moveOverlay && (
+            <motion.div
+              key={moveOverlay.key}
+              className="pointer-events-none absolute left-0 top-0"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.2 }}
+            >
+              <motion.span
+                className="absolute h-2 rounded-full bg-amber-300/80 shadow-[0_0_14px_rgba(252,211,77,0.75)]"
+                style={{
+                  left: moveOverlay.from.x,
+                  top: moveOverlay.from.y,
+                  width: moveOverlay.len,
+                  transformOrigin: "0 50%",
+                  rotate: `${moveOverlay.angle}deg`,
+                  translateY: "-50%",
+                }}
+                initial={{ scaleX: 0 }}
+                animate={{ scaleX: 1 }}
+                transition={{ duration: 0.38, ease: [0.22, 1, 0.36, 1] }}
+              />
+              <motion.span
+                className="absolute h-4 w-4 rounded-full border-2 border-amber-200 bg-amber-300/30 shadow-[0_0_18px_rgba(252,211,77,0.85)]"
+                style={{
+                  left: moveOverlay.to.x,
+                  top: moveOverlay.to.y,
+                  translateX: "-50%",
+                  translateY: "-50%",
+                }}
+                initial={{ scale: 0.4, opacity: 0 }}
+                animate={{ scale: [0.4, 1.35, 1], opacity: [0, 1, 0.9] }}
+                transition={{ duration: 0.55, ease: "easeOut" }}
+              />
+            </motion.div>
+          )}
+        </div>
       ) : (
         <div className="aspect-square w-full animate-pulse rounded-md bg-[var(--border)]/40" />
       )}
     </div>
   );
+}
+
+function squareCenter(square: string, boardWidth: number): { x: number; y: number } | null {
+  if (!/^[a-h][1-8]$/.test(square)) return null;
+  const size = boardWidth / 8;
+  const file = square.charCodeAt(0) - "a".charCodeAt(0);
+  const rank = parseInt(square[1], 10);
+  return {
+    x: file * size + size / 2,
+    y: (8 - rank) * size + size / 2,
+  };
 }
 
 function isLightSquare(square: string): boolean {

@@ -6,6 +6,7 @@ import AgentCard from "./AgentCard";
 import MoveLog from "./MoveLog";
 import { Chess } from "chess.js";
 import { useMemo } from "react";
+import { AnimatePresence, motion } from "framer-motion";
 
 export default function GameDetail() {
   const selectedId = useGameStore((s) => s.selectedGameId);
@@ -40,8 +41,16 @@ export default function GameDetail() {
   const black = agents[game.blackAgentId];
 
   return (
-    <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_360px]">
-      <div className="rounded-xl border border-[var(--border)] bg-[var(--card)] p-3 sm:p-4">
+    <AnimatePresence mode="wait" initial={false}>
+      <motion.div
+        key={game.id}
+        className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_360px]"
+        initial={{ opacity: 0, y: 10 }}
+        animate={{ opacity: 1, y: 0 }}
+        exit={{ opacity: 0, y: -8 }}
+        transition={{ duration: 0.28, ease: [0.22, 1, 0.36, 1] }}
+      >
+        <div className="rounded-xl border border-[var(--border)] bg-[var(--card)] p-3 sm:p-4">
         <div className="mb-3 flex items-center justify-between gap-2">
           <div className="flex flex-wrap items-center gap-2 text-sm">
             <span className="mono rounded bg-[var(--bg)] px-2 py-0.5 text-xs text-[var(--muted)]">
@@ -72,12 +81,13 @@ export default function GameDetail() {
 
         <CapturedRow pieces={captured.byWhite} />
         <AgentCard agent={white} side="w" active={game.turn === "w" && game.active} />
-      </div>
+        </div>
 
-      <div className="lg:sticky lg:top-24 lg:h-fit">
-        <MoveLog game={game} />
-      </div>
-    </div>
+        <div className="lg:sticky lg:top-24 lg:h-fit">
+          <MoveLog game={game} />
+        </div>
+      </motion.div>
+    </AnimatePresence>
   );
 }
 

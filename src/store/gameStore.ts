@@ -98,9 +98,10 @@ export const useGameStore = create<GameStoreState>((set, get) => ({
     // If the lambda answering this snapshot has not yet rehydrated its
     // active games (returns [] but we already know about some), preserve
     // the previous view so the user doesn't see an empty grid for a beat.
-    const games = data.games.length === 0 && prev.games.length > 0
+    const gamesRaw = data.games.length === 0 && prev.games.length > 0
       ? prev.games
       : data.games;
+    const games = [...gamesRaw].sort((a, b) => b.id - a.id);
 
     const next: Partial<GameStoreState> = {
       games,

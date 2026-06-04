@@ -60,6 +60,8 @@ const MAX_MOVES = 200;
 const DEFAULT_MIN_MOVE_DELAY_MS = 1800;
 const DEFAULT_MAX_MOVE_DELAY_MS = 4500;
 const HISTORY_LIMIT = 50;
+const DEFAULT_STALE_GAME_MS = 8 * 60 * 1000;
+const DEFAULT_MAX_GAME_AGE_MS = 30 * 60 * 1000;
 
 function moveDelayRange(): [number, number] {
   const minRaw = process.env.MIN_MOVE_DELAY_MS;
@@ -70,6 +72,21 @@ function moveDelayRange(): [number, number] {
   const min = Number.isFinite(minN) && minN >= 200 ? minN : DEFAULT_MIN_MOVE_DELAY_MS;
   const max = Number.isFinite(maxN) && maxN >= min ? maxN : Math.max(min, DEFAULT_MAX_MOVE_DELAY_MS);
   return [min, max];
+}
+
+function envMs(name: string, fallback: number, min: number): number {
+  const raw = process.env[name];
+  const n = raw ? parseInt(raw, 10) : fallback;
+  if (!Number.isFinite(n) || n < min) return fallback;
+  return n;
+}
+
+function staleGameMs(): number {
+  return envMs("STALE_GAME_MS", DEFAULT_STALE_GAME_MS, 60_000);
+}
+
+function maxGameAgeMs(): number {
+  return envMs("MAX_GAME_AGE_MS", DEFAULT_MAX_GAME_AGE_MS, 5 * 60_000);
 }
 
 interface ManagerState {
@@ -180,9 +197,17 @@ async function rehydrateFromRedis(state: ManagerState) {
   const ids = await listActiveGameIds();
   if (ids.length === 0) return;
 
+  const sortedIds = [...ids].sort((a, b) => b - a);
+  const target = numGames();
+  const idsToLoad = sortedIds.slice(0, target);
+  for (const id of sortedIds.slice(target)) {
+    // eslint-disable-next-line no-await-in-loop
+    await removeGame(id);
+  }
+
   const pool = getPool();
   let loaded = 0;
-  for (const id of ids) {
+  for (const id of idsToLoad) {
     if (state.games.has(id)) continue;
     try {
       // eslint-disable-next-line no-await-in-loop
@@ -547,6 +572,50 @@ function reapEndedGames(state: ManagerState) {
   }
 }
 
+function dropLocalGame(state: ManagerState, id: number) {
+  state.games.delete(id);
+  state.nextTickAt.delete(id);
+  if (isRedisEnabled()) removeGame(id).catch(() => {});
+}
+
+function pruneActiveGames(
+  state: ManagerState,
+  target: number,
+  options: { retireStale?: boolean } = {},
+) {
+  const now = Date.now();
+  const staleMs = staleGameMs();
+  const maxAgeMs = maxGameAgeMs();
+  let retired = 0;
+
+  if (options.retireStale) {
+    const stale = [...state.games.values()]
+      .filter((g) => {
+        if (!g.active) return false;
+        const idleFor = now - (g.lastMoveAt || g.startedAt);
+        const age = now - g.startedAt;
+        return idleFor > staleMs || age > maxAgeMs;
+      })
+      .sort((a, b) => a.id - b.id);
+
+    for (const g of stale.slice(0, 1)) {
+      const idleFor = now - (g.lastMoveAt || g.startedAt);
+      const age = now - g.startedAt;
+      console.log(`[GM] retiring stale game ${g.id} (idle=${idleFor}ms age=${age}ms)`);
+      endGame(state, g, "1/2-1/2");
+      retired += 1;
+    }
+  }
+
+  const active = [...state.games.values()]
+    .filter((g) => g.active)
+    .sort((a, b) => b.id - a.id);
+  for (const g of active.slice(target)) {
+    console.log(`[GM] pruning overflow game ${g.id}; target=${target}; retired=${retired}`);
+    dropLocalGame(state, g.id);
+  }
+}
+
 /**
  * Resync local game state with the contract when local has advanced past
  * what chain has actually recorded. This happens when a playMove UserOp fails
@@ -603,6 +672,7 @@ async function syncGameFromChain(state: ManagerState, game: GameState) {
     game.active = false;
     state.games.delete(game.id);
     state.nextTickAt.delete(game.id);
+    if (isRedisEnabled()) removeGame(game.id).catch(() => {});
     return;
   }
   if (
@@ -616,6 +686,7 @@ async function syncGameFromChain(state: ManagerState, game: GameState) {
     game.active = false;
     state.games.delete(game.id);
     state.nextTickAt.delete(game.id);
+    if (isRedisEnabled()) removeGame(game.id).catch(() => {});
     return;
   }
 
@@ -783,6 +854,7 @@ export async function runTick() {
     // Clear out games that ended a few seconds ago (their winner animation
     // window has elapsed).
     reapEndedGames(state);
+    pruneActiveGames(state, target, { retireStale: true });
 
     // Refill — start at most a couple of games per tick to avoid bursts of
     // CDP smart-account provisioning when first running on mainnet. Count
@@ -795,6 +867,7 @@ export async function runTick() {
       await startNewGame(state);
       toStart -= 1;
     }
+    pruneActiveGames(state, target);
 
     // Advance. Filter due games then immediately reserve their next tick time
     // synchronously — that way overlapping tick callers (we already lock above,
@@ -860,6 +933,7 @@ export async function runCatchUp(options?: {
 export async function snapshot() {
   const state = getState();
   await ensureBootstrapped(state);
+  pruneActiveGames(state, numGames());
   const games = [...state.games.values()].map((g) => structuredClone(g));
   const agentsMap: Record<string, Agent> = {};
   const pool = getPool();
