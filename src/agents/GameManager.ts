@@ -199,16 +199,15 @@ async function rehydrateFromRedis(state: ManagerState) {
 
   const sortedIds = [...ids].sort((a, b) => b - a);
   const target = numGames();
-  const idsToLoad = sortedIds.slice(0, target);
-  for (const id of sortedIds.slice(target)) {
-    // eslint-disable-next-line no-await-in-loop
-    await removeGame(id);
-  }
-
   const pool = getPool();
   let loaded = 0;
-  for (const id of idsToLoad) {
+  for (const id of sortedIds) {
     if (state.games.has(id)) continue;
+    if (loaded >= target) {
+      // eslint-disable-next-line no-await-in-loop
+      await removeGame(id);
+      continue;
+    }
     try {
       // eslint-disable-next-line no-await-in-loop
       const saved = await getSavedGameState(id);
@@ -223,7 +222,12 @@ async function rehydrateFromRedis(state: ManagerState) {
       const assign = await getAssignment(id);
       // eslint-disable-next-line no-await-in-loop
       const onchain = await getOnchainGame(id);
-      if (!assign || !onchain) continue;
+      if (!assign) {
+        // eslint-disable-next-line no-await-in-loop
+        await removeGame(id);
+        continue;
+      }
+      if (!onchain) continue;
       if (!onchain.active) {
         // eslint-disable-next-line no-await-in-loop
         await removeGame(id);
@@ -861,7 +865,8 @@ export async function runTick() {
     // only ACTIVE games toward the target so just-ended games lingering for
     // the winner animation don't block new ones from starting.
     const activeCountNow = [...state.games.values()].filter((g) => g.active).length;
-    let toStart = Math.min(2, target - activeCountNow);
+    const maxStartsThisTick = activeCountNow === 0 ? Math.min(target, 5) : 2;
+    let toStart = Math.min(maxStartsThisTick, target - activeCountNow);
     while (toStart > 0) {
       // eslint-disable-next-line no-await-in-loop
       await startNewGame(state);

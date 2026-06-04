@@ -119,8 +119,25 @@ export default function GameGrid() {
         Array.from({ length: 5 }).map((_, i) => (
           <div
             key={i}
-            className="aspect-square animate-pulse rounded-xl border border-[var(--border)] bg-[var(--card)]"
-          />
+            className="aspect-square rounded-xl border border-[var(--border)] bg-[var(--card)] p-2"
+          >
+            <div className="mb-2 flex items-center justify-between">
+              <span className="h-3 w-12 animate-pulse rounded bg-[var(--border)]" />
+              <span className="h-2 w-2 animate-pulse rounded-full bg-accent-emerald" />
+            </div>
+            <div className="grid aspect-square grid-cols-8 overflow-hidden rounded-md border border-[var(--border)]">
+              {Array.from({ length: 64 }).map((_, sq) => (
+                <span
+                  key={sq}
+                  className={`animate-pulse ${
+                    (Math.floor(sq / 8) + sq) % 2 === 0
+                      ? "bg-[var(--border)]/35"
+                      : "bg-[var(--border)]/15"
+                  }`}
+                />
+              ))}
+            </div>
+          </div>
         ))}
     </motion.div>
   );
